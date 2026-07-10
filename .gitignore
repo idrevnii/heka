@@ -1,0 +1,6 @@
+# local config may reference real key material paths / tokens
+/heka.yaml
+
+# build output
+/heka
+/dist/

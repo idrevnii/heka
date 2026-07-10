@@ -1,0 +1,235 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func write(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "heka.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const valid = `
+auth:
+  tokens: [ "${TEST_HEKA_TOKEN}" ]
+rotation:
+  cooldown_base: 30s
+  max_body_buffer: 1MiB
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    key_in: { header: x-api-key }
+    keys: [ "k-one", "k-two" ]
+    rotation:
+      max_retries: 5
+  google:
+    base_url: https://generativelanguage.googleapis.com
+    key_in: { query: key }
+    keys: [ "g-one" ]
+sidecar:
+  cliproxy:
+    route: oauth
+    command: [ "cli-proxy-api" ]
+    port: 8317
+`
+
+func TestLoadValid(t *testing.T) {
+	t.Setenv("TEST_HEKA_TOKEN", "secret-token")
+	cfg, err := Load(write(t, valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Listen != "127.0.0.1:8787" {
+		t.Fatalf("default listen = %q", cfg.Listen)
+	}
+	if cfg.Auth.Tokens[0] != "secret-token" {
+		t.Fatalf("env interpolation failed: %q", cfg.Auth.Tokens[0])
+	}
+
+	rot := cfg.RotationFor("anthropic")
+	if rot.CooldownBase != 30*time.Second {
+		t.Fatalf("global override lost: %v", rot.CooldownBase)
+	}
+	if rot.CooldownMax != time.Hour {
+		t.Fatalf("built-in default lost: %v", rot.CooldownMax)
+	}
+	if rot.MaxRetries != 5 {
+		t.Fatalf("provider override lost: %d", rot.MaxRetries)
+	}
+	if rot.MaxBodyBuffer != 1<<20 {
+		t.Fatalf("size parsing: %d", rot.MaxBodyBuffer)
+	}
+	if got := cfg.RotationFor("google").MaxRetries; got != 3 {
+		t.Fatalf("google max_retries = %d, want default 3", got)
+	}
+	if cfg.Sidecar["cliproxy"].Route != "oauth" {
+		t.Fatalf("sidecar route = %q", cfg.Sidecar["cliproxy"].Route)
+	}
+}
+
+func TestMissingEnvVar(t *testing.T) {
+	os.Unsetenv("TEST_HEKA_TOKEN_MISSING")
+	_, err := Load(write(t, `
+auth:
+  tokens: [ "${TEST_HEKA_TOKEN_MISSING}" ]
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: x-api-key }
+    keys: [ "k" ]
+`))
+	if err == nil || !strings.Contains(err.Error(), "TEST_HEKA_TOKEN_MISSING") {
+		t.Fatalf("want undefined env var error, got %v", err)
+	}
+}
+
+func loadErr(t *testing.T, yaml, wantSubstr string) {
+	t.Helper()
+	_, err := Load(write(t, yaml))
+	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("want error containing %q, got %v", wantSubstr, err)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	loadErr(t, `
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`, "auth.tokens")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+`, "no providers")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p:
+    base_url: example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`, "absolute http(s) URL")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h, query: q }
+    keys: [ "k" ]
+`, "mutually exclusive")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: []
+`, "at least one key")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  status:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`, "reserved")
+
+	// A sidecar route colliding with a provider name.
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+sidecar:
+  s:
+    route: p
+    url: http://127.0.0.1:9000
+`, "already used")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+sidecar:
+  s:
+    command: [ "bin" ]
+    url: http://127.0.0.1:9000
+`, "mutually exclusive")
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+sidecar:
+  s:
+    command: [ "bin" ]
+`, "port")
+
+	// Typos in field names must not pass silently.
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p:
+    baseurl: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`, "baseurl")
+}
+
+func TestSidecarRouteDefaultsToName(t *testing.T) {
+	cfg, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+sidecar:
+  oauth:
+    url: http://127.0.0.1:8317
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sidecar["oauth"].Route != "oauth" {
+		t.Fatalf("route = %q, want name fallback", cfg.Sidecar["oauth"].Route)
+	}
+}
+
+func TestSizeParsing(t *testing.T) {
+	for raw, want := range map[string]int64{
+		`"1024"`: 1024, `512KiB`: 512 << 10, `10MiB`: 10 << 20, `1GiB`: 1 << 30,
+	} {
+		cfg, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+rotation: { max_body_buffer: `+raw+` }
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`))
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if got := cfg.DefaultRotation().MaxBodyBuffer; got != want {
+			t.Fatalf("%s = %d, want %d", raw, got, want)
+		}
+	}
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+rotation: { max_body_buffer: 10MB }
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+`, "invalid size")
+}

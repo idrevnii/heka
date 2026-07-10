@@ -1,0 +1,55 @@
+# heka gateway configuration. Secrets come from environment variables via
+# ${VAR} interpolation; the file itself stays free of key material.
+
+listen: "127.0.0.1:8787"
+
+auth:
+  tokens:
+    - ${HEKA_TOKEN}
+
+# Rotation defaults; can be overridden per provider with the same section.
+rotation:
+  cooldown_base: 60s
+  cooldown_max: 1h
+  max_retries: 3        # max key switches per request
+  max_body_buffer: 10MiB
+
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    key_in: { header: x-api-key }
+    keys: [ "${ANTHROPIC_KEY_1}", "${ANTHROPIC_KEY_2}" ]
+
+  openai:
+    base_url: https://api.openai.com
+    key_in: { header: Authorization, prefix: "Bearer " }
+    keys: [ "${OPENAI_KEY_1}" ]
+
+  google:
+    base_url: https://generativelanguage.googleapis.com
+    key_in: { header: x-goog-api-key }
+    keys: [ "${GEMINI_KEY_1}", "${GEMINI_KEY_2}" ]
+
+  openrouter:
+    base_url: https://openrouter.ai
+    key_in: { header: Authorization, prefix: "Bearer " }
+    keys: [ "${OPENROUTER_KEY_1}" ]
+
+  tavily:
+    base_url: https://api.tavily.com
+    key_in: { header: Authorization, prefix: "Bearer " }
+    keys: [ "${TAVILY_KEY_1}", "${TAVILY_KEY_2}" ]
+
+  exa:
+    base_url: https://api.exa.ai
+    key_in: { header: x-api-key }
+    keys: [ "${EXA_KEY_1}" ]
+
+# OAuth subscriptions exposed as API via CLIProxyAPI.
+# sidecar:
+#   cliproxy:
+#     route: oauth
+#     command: [ "cli-proxy-api", "--config", "/etc/cliproxy/config.yaml" ]
+#     port: 8317
+#     # ...or point at an already running instance instead of command/port:
+#     # url: http://127.0.0.1:8317
