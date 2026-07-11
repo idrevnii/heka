@@ -13,11 +13,12 @@ type Config struct {
 }
 
 type Pool struct {
-	mu   sync.Mutex
-	cfg  Config
-	keys []*key
-	next int
-	now  func() time.Time
+	mu    sync.Mutex
+	cfg   Config
+	keys  []*key
+	masks []string // immutable after New, safe to read without the lock
+	next  int
+	now   func() time.Time
 }
 
 type key struct {
@@ -33,6 +34,7 @@ func New(cfg Config, secrets []string) *Pool {
 	p := &Pool{cfg: cfg, now: time.Now}
 	for _, s := range secrets {
 		p.keys = append(p.keys, &key{secret: s})
+		p.masks = append(p.masks, Mask(s))
 	}
 	return p
 }
@@ -76,27 +78,32 @@ func (p *Pool) ReportSuccess(idx int) {
 	k := p.keys[idx]
 	k.successes++
 	k.consecLimited = 0
+	// A key that just worked is not rate-limited, whatever an earlier
+	// cooldown said (it can be reached via Acquire's all-cooling fallback).
+	k.cooldownUntil = time.Time{}
 }
 
 // ReportRateLimited puts the key into cooldown: for retryAfter if the
-// provider supplied one, otherwise exponentially by consecutive 429s.
-// Returns the applied cooldown.
-func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration) time.Duration {
+// provider supplied the header (hasRetryAfter), otherwise exponentially by
+// consecutive 429s. Returns the applied cooldown.
+func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration, hasRetryAfter bool) time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	k := p.keys[idx]
 	k.failures++
 	k.consecLimited++
-	d := retryAfter
-	if d <= 0 {
+	var d time.Duration
+	if hasRetryAfter {
+		// "Retry-After: 0" means retry now; a small floor keeps the
+		// cooldown bookkeeping meaningful without really benching the key.
+		d = max(retryAfter, time.Second)
+	} else {
 		d = p.cfg.CooldownBase
 		for i := 1; i < k.consecLimited && d < p.cfg.CooldownMax; i++ {
 			d *= 2
 		}
 	}
-	if d > p.cfg.CooldownMax {
-		d = p.cfg.CooldownMax
-	}
+	d = min(d, p.cfg.CooldownMax)
 	k.cooldownUntil = p.now().Add(d)
 	return d
 }
@@ -142,7 +149,7 @@ func (p *Pool) Snapshot() []KeyStatus {
 	now := p.now()
 	out := make([]KeyStatus, len(p.keys))
 	for i, k := range p.keys {
-		st := KeyStatus{Key: Mask(k.secret), State: "active", Successes: k.successes, Failures: k.failures}
+		st := KeyStatus{Key: p.masks[i], State: "active", Successes: k.successes, Failures: k.failures}
 		switch {
 		case k.disabled:
 			st.State = "disabled"
@@ -157,18 +164,17 @@ func (p *Pool) Snapshot() []KeyStatus {
 }
 
 func (p *Pool) MaskedKey(idx int) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if idx < 0 || idx >= len(p.keys) {
+	if idx < 0 || idx >= len(p.masks) {
 		return ""
 	}
-	return Mask(p.keys[idx].secret)
+	return p.masks[idx]
 }
 
-// Mask keeps just enough of a secret to tell keys apart in logs and /status.
+// Mask keeps just enough of a secret to tell keys apart in logs and /status;
+// short secrets are hidden entirely so the mask never reveals most of a key.
 func Mask(s string) string {
-	if len(s) <= 12 {
+	if len(s) < 16 {
 		return "****"
 	}
-	return s[:5] + "…" + s[len(s)-4:]
+	return s[:4] + "…" + s[len(s)-4:]
 }

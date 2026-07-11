@@ -16,27 +16,37 @@ import (
 	"github.com/idrevnii/heka/internal/proxy"
 )
 
+// Supervisor manages one sidecar upstream: with Command set it runs and
+// restarts the child process; with URL set it only healthchecks an external
+// instance. Both modes gate the route on the HTTP healthcheck.
 type Supervisor struct {
-	Name    string
-	Command []string
-	Port    int
-	Log     *slog.Logger
+	Name     string
+	Command  []string
+	Port     int
+	URL      string
+	Interval time.Duration // healthcheck period; default 2s
+	Log      *slog.Logger
 
 	healthy atomic.Bool
 	runDone chan struct{}
 }
 
-// Start launches the process and the healthcheck loop; both stop when ctx
-// is cancelled.
+// Start launches the process (when supervised) and the healthcheck loop;
+// both stop when ctx is cancelled.
 func (s *Supervisor) Start(ctx context.Context) {
-	s.runDone = make(chan struct{})
-	go s.run(ctx)
+	if len(s.Command) > 0 {
+		s.runDone = make(chan struct{})
+		go s.run(ctx)
+	}
 	go s.health(ctx)
 }
 
 // Wait blocks until the child process has exited after ctx cancellation,
 // or the timeout elapses.
 func (s *Supervisor) Wait(timeout time.Duration) {
+	if s.runDone == nil {
+		return
+	}
 	select {
 	case <-s.runDone:
 	case <-time.After(timeout):
@@ -84,7 +94,10 @@ func (s *Supervisor) run(ctx context.Context) {
 
 func (s *Supervisor) health(ctx context.Context) {
 	client := &http.Client{Timeout: time.Second}
-	target := fmt.Sprintf("http://127.0.0.1:%d/", s.Port)
+	target := s.URL
+	if target == "" {
+		target = fmt.Sprintf("http://127.0.0.1:%d/", s.Port)
+	}
 	check := func() {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		if err != nil {
@@ -101,11 +114,15 @@ func (s *Supervisor) health(ctx context.Context) {
 		}
 		resp.Body.Close()
 		if !s.healthy.Swap(true) {
-			s.Log.Info("sidecar healthy", "sidecar", s.Name, "port", s.Port)
+			s.Log.Info("sidecar healthy", "sidecar", s.Name, "target", target)
 		}
 	}
 	check()
-	ticker := time.NewTicker(2 * time.Second)
+	interval := s.Interval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

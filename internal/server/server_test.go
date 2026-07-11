@@ -94,6 +94,31 @@ func TestXApiKeyAuth(t *testing.T) {
 	}
 }
 
+// A valid token in one header must win even when an unrelated Bearer header
+// rides along (SDKs and middlewares add their own Authorization).
+func TestValidTokenNotShadowedByForeignBearer(t *testing.T) {
+	srv, _, _ := newServer(t)
+	req := httptest.NewRequest("POST", "/anthropic/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer some-unrelated-oauth-token")
+	req.Header.Set("X-Api-Key", "gw-token")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("x-api-key shadowed by foreign Bearer: %d", rec.Code)
+	}
+}
+
+func TestGoogHeaderAuth(t *testing.T) {
+	srv, _, _ := newServer(t)
+	req := httptest.NewRequest("POST", "/anthropic/v1/messages", nil)
+	req.Header.Set("X-Goog-Api-Key", "gw-token")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("x-goog-api-key auth = %d", rec.Code)
+	}
+}
+
 func TestStatusAndReset(t *testing.T) {
 	srv, pool, _ := newServer(t)
 	pool.ReportInvalid(0)

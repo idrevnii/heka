@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/idrevnii/heka/internal/config"
 	"github.com/idrevnii/heka/internal/keypool"
 )
 
@@ -47,7 +49,7 @@ func (u *upstream) count() int {
 	return len(u.requests)
 }
 
-func newHandler(t *testing.T, target string, keyIn KeyIn, keys ...string) (*Handler, *keypool.Pool) {
+func newHandler(t *testing.T, target string, keyIn config.KeyIn, keys ...string) (*Handler, *keypool.Pool) {
 	t.Helper()
 	u, err := url.Parse(target)
 	if err != nil {
@@ -58,11 +60,16 @@ func newHandler(t *testing.T, target string, keyIn KeyIn, keys ...string) (*Hand
 		pool = keypool.New(keypool.Config{CooldownBase: time.Minute, CooldownMax: time.Hour}, keys)
 	}
 	return &Handler{
-		Name:      "test",
-		Target:    u,
-		KeyIn:     keyIn,
-		Pool:      pool,
-		Params:    Params{MaxRetries: 3, MaxBodyBuffer: 1 << 20},
+		Name:   "test",
+		Target: u,
+		KeyIn:  keyIn,
+		Pool:   pool,
+		Params: Params{
+			MaxRetries:    3,
+			MaxBodyBuffer: 1 << 20,
+			CooldownOn:    []int{429},
+			DisableOn:     []int{401, 402, 403},
+		},
 		Transport: http.DefaultTransport,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}, pool
@@ -79,7 +86,7 @@ func TestPassthrough(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"ok":true}`)
 	})
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1)
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1)
 
 	req := httptest.NewRequest("POST", "/v1/messages?beta=true", strings.NewReader(`{"model":"m"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -117,13 +124,13 @@ func TestKeyPrefixAndQueryInjection(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1)
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/models", nil))
 	if got := up.requests[0].Header.Get("Authorization"); got != "Bearer "+key1 {
 		t.Fatalf("prefixed header = %q", got)
 	}
 
-	h, _ = newHandler(t, up.srv.URL, KeyIn{Query: "key"}, key1)
+	h, _ = newHandler(t, up.srv.URL, config.KeyIn{Query: "key"}, key1)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1beta/models?alt=json", nil))
 	q := up.requests[1].URL.Query()
 	if q.Get("key") != key1 || q.Get("alt") != "json" {
@@ -140,7 +147,7 @@ func TestRotationOn429(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	h, pool := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader("{}")))
@@ -170,7 +177,7 @@ func TestAllKeysExhaustedReturnsLastResponse(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		fmt.Fprint(w, `{"error":"rate limited"}`)
 	})
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader("{}")))
@@ -189,7 +196,7 @@ func TestMaxRetriesBoundsAttempts(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"},
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"},
 		"key-a-aaaaaaaaaa", "key-b-bbbbbbbbbb", "key-c-cccccccccc",
 		"key-d-dddddddddd", "key-e-eeeeeeeeee", "key-f-ffffffffff")
 	h.Params.MaxRetries = 2
@@ -208,7 +215,7 @@ func TestInvalidKeyDisabled(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	h, pool := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
@@ -228,7 +235,7 @@ func TestRetryOn5xx(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	h, pool := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
@@ -242,7 +249,7 @@ func TestRetryOn5xx(t *testing.T) {
 }
 
 func TestUnreachableUpstream(t *testing.T) {
-	h, _ := newHandler(t, "http://127.0.0.1:1", KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, _ := newHandler(t, "http://127.0.0.1:1", config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
 	if rec.Code != http.StatusBadGateway {
@@ -257,7 +264,7 @@ func TestUnreachableUpstream(t *testing.T) {
 }
 
 func TestAllKeysDisabledReturns503(t *testing.T) {
-	h, pool := newHandler(t, "http://127.0.0.1:1", KeyIn{Header: "X-Api-Key"}, key1)
+	h, pool := newHandler(t, "http://127.0.0.1:1", config.KeyIn{Header: "X-Api-Key"}, key1)
 	pool.ReportInvalid(0)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
@@ -270,7 +277,7 @@ func TestOversizedBodySingleAttempt(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
 	h.Params.MaxBodyBuffer = 16
 
 	big := strings.Repeat("x", 100)
@@ -298,7 +305,7 @@ func TestStreamingFlush(t *testing.T) {
 		<-release
 		fmt.Fprint(w, "data: second\n\n")
 	})
-	h, _ := newHandler(t, up.srv.URL, KeyIn{Header: "X-Api-Key"}, key1)
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1)
 	front := httptest.NewServer(h)
 	defer front.Close()
 
@@ -319,5 +326,76 @@ func TestStreamingFlush(t *testing.T) {
 	rest, _ := io.ReadAll(rd)
 	if !strings.Contains(string(rest), "data: second") {
 		t.Fatalf("rest = %q", rest)
+	}
+}
+
+// TestQueryByteForBytePassthrough: injecting a query key must not reorder or
+// re-encode the client's own parameters.
+func TestQueryByteForBytePassthrough(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Query: "key"}, key1)
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "/v1beta/models?zeta=%2B1&alpha=2", nil))
+	want := "zeta=%2B1&alpha=2&key=" + key1
+	if got := up.requests[0].URL.RawQuery; got != want {
+		t.Fatalf("RawQuery = %q, want %q", got, want)
+	}
+}
+
+// TestStaticKeyForSidecarUpstream: a pool-less handler with StaticKey must
+// authenticate to the upstream while the gateway token is stripped.
+func TestStaticKeyForSidecarUpstream(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "Authorization", Prefix: "Bearer "})
+	h.StaticKey = "cliproxy-secret-key"
+
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"m":1}`))
+	req.Header.Set("X-Api-Key", "gateway-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := up.requests[0]
+	if got.Header.Get("Authorization") != "Bearer cliproxy-secret-key" {
+		t.Fatalf("static key not injected: %q", got.Header.Get("Authorization"))
+	}
+	if got.Header.Get("X-Api-Key") != "" {
+		t.Fatal("gateway token leaked to sidecar upstream")
+	}
+	if up.bodies[0] != `{"m":1}` {
+		t.Fatalf("body = %q (unbuffered path must still deliver it)", up.bodies[0])
+	}
+}
+
+// TestClientCancelNoRotation: a client disconnect must not burn through the
+// key pool or count as key failures.
+func TestClientCancelNoRotation(t *testing.T) {
+	started := make(chan struct{})
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if n == 1 {
+			close(started)
+		}
+		<-r.Context().Done()
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	req := httptest.NewRequest("POST", "/x", strings.NewReader("{}")).WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if up.count() != 1 {
+		t.Fatalf("attempts = %d, want 1 (no rotation on client cancel)", up.count())
+	}
+	for i, ks := range pool.Snapshot() {
+		if ks.Failures != 0 {
+			t.Fatalf("key %d failures = %d, want 0", i, ks.Failures)
+		}
 	}
 }

@@ -34,6 +34,8 @@ type Rotation struct {
 	CooldownMax   *Duration `yaml:"cooldown_max"`
 	MaxRetries    *int      `yaml:"max_retries"`
 	MaxBodyBuffer *Size     `yaml:"max_body_buffer"`
+	CooldownOn    []int     `yaml:"cooldown_on"`
+	DisableOn     []int     `yaml:"disable_on"`
 }
 
 // RotationParams is a fully resolved rotation policy.
@@ -42,6 +44,8 @@ type RotationParams struct {
 	CooldownMax   time.Duration
 	MaxRetries    int
 	MaxBodyBuffer int64
+	CooldownOn    []int
+	DisableOn     []int
 }
 
 type Provider struct {
@@ -64,6 +68,10 @@ type Sidecar struct {
 	Command []string `yaml:"command"`
 	Port    int      `yaml:"port"`
 	URL     string   `yaml:"url"`
+	// Optional static key injected into sidecar requests (for CLIProxyAPI
+	// instances that require their own api-key). No rotation.
+	KeyIn *KeyIn `yaml:"key_in"`
+	Key   string `yaml:"key"`
 }
 
 type Duration time.Duration
@@ -121,17 +129,29 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := expandEnv(raw)
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if doc.Kind == 0 {
+		return nil, fmt.Errorf("%s: config is empty", path)
+	}
+	var missing []string
+	expandEnvNode(&doc, &missing)
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%s: undefined environment variables: %s",
+			path, strings.Join(missing, ", "))
+	}
+	// Re-emit and strictly re-parse: the YAML emitter quotes substituted
+	// values, so secrets stay opaque strings whatever characters they hold.
+	data, err := yaml.Marshal(&doc)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("%s: config is empty", path)
-		}
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := cfg.validate(); err != nil {
@@ -140,23 +160,48 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-var envRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+// envRe matches ${VAR} plus the $${VAR} escape for a literal ${VAR}.
+var envRe = regexp.MustCompile(`\$?\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
 
-func expandEnv(data []byte) ([]byte, error) {
-	var missing []string
-	out := envRe.ReplaceAllFunc(data, func(m []byte) []byte {
-		name := string(envRe.FindSubmatch(m)[1])
-		v, ok := os.LookupEnv(name)
-		if !ok {
-			missing = append(missing, name)
-			return m
+// expandEnvNode expands ${VAR} in scalar values only — comments and mapping
+// keys are never touched, so commented-out secrets can't fail the load.
+func expandEnvNode(n *yaml.Node, missing *[]string) {
+	if n.Kind == yaml.ScalarNode {
+		expanded := envRe.ReplaceAllStringFunc(n.Value, func(m string) string {
+			if strings.HasPrefix(m, "$$") {
+				return m[1:]
+			}
+			name := m[2 : len(m)-1]
+			v, ok := os.LookupEnv(name)
+			if !ok {
+				*missing = append(*missing, name)
+				return m
+			}
+			return v
+		})
+		if expanded != n.Value {
+			n.Value = expanded
+			// Quoted scalars must stay strings; plain ones re-resolve on
+			// the second parse (so `port: ${PORT}` still becomes an int).
+			if n.Style == yaml.DoubleQuotedStyle || n.Style == yaml.SingleQuotedStyle {
+				n.Tag = "!!str"
+			} else {
+				n.Tag = ""
+			}
 		}
-		return []byte(v)
-	})
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("undefined environment variables: %s", strings.Join(missing, ", "))
+		return
 	}
-	return out, nil
+	children := n.Content
+	if n.Kind == yaml.MappingNode {
+		// Values live at odd indexes; keys are left alone.
+		for i := 1; i < len(children); i += 2 {
+			expandEnvNode(children[i], missing)
+		}
+		return
+	}
+	for _, c := range children {
+		expandEnvNode(c, missing)
+	}
 }
 
 // DefaultRotation returns the built-in rotation defaults with the global
@@ -167,6 +212,8 @@ func (c *Config) DefaultRotation() RotationParams {
 		CooldownMax:   time.Hour,
 		MaxRetries:    3,
 		MaxBodyBuffer: 10 << 20,
+		CooldownOn:    []int{429},
+		DisableOn:     []int{401, 402, 403},
 	}
 	c.Rotation.apply(&p)
 	return p
@@ -198,6 +245,50 @@ func (r *Rotation) apply(p *RotationParams) {
 	if r.MaxBodyBuffer != nil {
 		p.MaxBodyBuffer = int64(*r.MaxBodyBuffer)
 	}
+	// A present-but-empty list is a deliberate "never" override.
+	if r.CooldownOn != nil {
+		p.CooldownOn = r.CooldownOn
+	}
+	if r.DisableOn != nil {
+		p.DisableOn = r.DisableOn
+	}
+}
+
+func (r *Rotation) validate(where string) error {
+	if r == nil {
+		return nil
+	}
+	if r.MaxRetries != nil && *r.MaxRetries < 0 {
+		return fmt.Errorf("%s: max_retries must be >= 0", where)
+	}
+	for _, list := range [][]int{r.CooldownOn, r.DisableOn} {
+		for _, code := range list {
+			if code < 100 || code > 599 {
+				return fmt.Errorf("%s: status code %d out of range", where, code)
+			}
+		}
+	}
+	return nil
+}
+
+func validateHTTPURL(raw, where string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s: %q must be an absolute http(s) URL", where, raw)
+	}
+	return nil
+}
+
+func (k *KeyIn) validate(where string) error {
+	switch {
+	case k.Header != "" && k.Query != "":
+		return fmt.Errorf("%s: header and query are mutually exclusive", where)
+	case k.Header == "" && k.Query == "":
+		return fmt.Errorf("%s: one of header or query is required", where)
+	case k.Prefix != "" && k.Header == "":
+		return fmt.Errorf("%s: prefix requires header", where)
+	}
+	return nil
 }
 
 var routeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -214,8 +305,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("auth.tokens[%d] is empty", i)
 		}
 	}
-	if r := c.Rotation; r != nil && r.MaxRetries != nil && *r.MaxRetries < 0 {
-		return errors.New("rotation.max_retries must be >= 0")
+	if err := c.Rotation.validate("rotation"); err != nil {
+		return err
 	}
 	if len(c.Providers) == 0 && len(c.Sidecar) == 0 {
 		return errors.New("no providers or sidecars configured")
@@ -244,17 +335,11 @@ func (c *Config) validate() error {
 		if err := claim(name, where); err != nil {
 			return err
 		}
-		u, err := url.Parse(p.BaseURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("%s: base_url %q must be an absolute http(s) URL", where, p.BaseURL)
+		if err := validateHTTPURL(p.BaseURL, where+": base_url"); err != nil {
+			return err
 		}
-		switch {
-		case p.KeyIn.Header != "" && p.KeyIn.Query != "":
-			return fmt.Errorf("%s: key_in: header and query are mutually exclusive", where)
-		case p.KeyIn.Header == "" && p.KeyIn.Query == "":
-			return fmt.Errorf("%s: key_in: one of header or query is required", where)
-		case p.KeyIn.Prefix != "" && p.KeyIn.Header == "":
-			return fmt.Errorf("%s: key_in: prefix requires header", where)
+		if err := p.KeyIn.validate(where + ": key_in"); err != nil {
+			return err
 		}
 		if len(p.Keys) == 0 {
 			return fmt.Errorf("%s: at least one key is required", where)
@@ -264,8 +349,8 @@ func (c *Config) validate() error {
 				return fmt.Errorf("%s: keys[%d] is empty", where, i)
 			}
 		}
-		if p.Rotation != nil && p.Rotation.MaxRetries != nil && *p.Rotation.MaxRetries < 0 {
-			return fmt.Errorf("%s: rotation.max_retries must be >= 0", where)
+		if err := p.Rotation.validate(where + ": rotation"); err != nil {
+			return err
 		}
 	}
 
@@ -289,9 +374,18 @@ func (c *Config) validate() error {
 		case hasCmd && (s.Port < 1 || s.Port > 65535):
 			return fmt.Errorf("%s: port must be in 1..65535", where)
 		case hasURL:
-			u, err := url.Parse(s.URL)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				return fmt.Errorf("%s: url %q must be an absolute http(s) URL", where, s.URL)
+			if err := validateHTTPURL(s.URL, where+": url"); err != nil {
+				return err
+			}
+		}
+		switch {
+		case s.Key != "" && s.KeyIn == nil:
+			return fmt.Errorf("%s: key requires key_in", where)
+		case s.Key == "" && s.KeyIn != nil:
+			return fmt.Errorf("%s: key_in requires key", where)
+		case s.KeyIn != nil:
+			if err := s.KeyIn.validate(where + ": key_in"); err != nil {
+				return err
 			}
 		}
 	}

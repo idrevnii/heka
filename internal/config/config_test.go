@@ -75,6 +75,104 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+// Secrets are substituted at the YAML node level, so any characters — quotes,
+// newlines, YAML syntax — stay inside the string value.
+func TestEnvValueWithYAMLMetachars(t *testing.T) {
+	nasty := `ab"cd', [x]: &y ` + "\nnewline"
+	t.Setenv("TEST_NASTY_SECRET", nasty)
+	cfg, err := Load(write(t, `
+auth:
+  tokens: [ "${TEST_NASTY_SECRET}" ]
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: x-api-key }
+    keys: [ "k-something-long" ]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Auth.Tokens) != 1 || cfg.Auth.Tokens[0] != nasty {
+		t.Fatalf("secret mangled: %q", cfg.Auth.Tokens)
+	}
+}
+
+// ${VAR} inside comments is inert; $${VAR} passes a literal ${VAR} through.
+func TestEnvExpansionCommentsAndEscape(t *testing.T) {
+	os.Unsetenv("TEST_COMMENTED_OUT_KEY")
+	cfg, err := Load(write(t, `
+auth:
+  tokens: [ "t-something-long" ]
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: x-api-key }
+    # keys: [ "${TEST_COMMENTED_OUT_KEY}" ]
+    keys: [ "$${NOT_AN_ENV_REF}" ]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["p"].Keys[0]; got != "${NOT_AN_ENV_REF}" {
+		t.Fatalf("escape: %q", got)
+	}
+}
+
+func TestRotationTriggerOverrides(t *testing.T) {
+	cfg, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+rotation:
+  disable_on: [ 401 ]
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+    rotation:
+      cooldown_on: [ 429, 529 ]
+      disable_on: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rot := cfg.RotationFor("p")
+	if len(rot.CooldownOn) != 2 || rot.CooldownOn[1] != 529 {
+		t.Fatalf("cooldown_on = %v", rot.CooldownOn)
+	}
+	// Empty list is a deliberate "never disable" override.
+	if len(rot.DisableOn) != 0 {
+		t.Fatalf("disable_on = %v, want empty override", rot.DisableOn)
+	}
+	if got := cfg.DefaultRotation().DisableOn; len(got) != 1 || got[0] != 401 {
+		t.Fatalf("global disable_on = %v", got)
+	}
+}
+
+func TestSidecarKeyValidation(t *testing.T) {
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+sidecar:
+  s:
+    url: http://127.0.0.1:8317
+    key: secret
+`, "key requires key_in")
+
+	cfg, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+sidecar:
+  s:
+    url: http://127.0.0.1:8317
+    key_in: { header: Authorization, prefix: "Bearer " }
+    key: secret
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sidecar["s"].KeyIn.Header != "Authorization" || cfg.Sidecar["s"].Key != "secret" {
+		t.Fatalf("sidecar key config lost: %+v", cfg.Sidecar["s"])
+	}
+}
+
 func TestMissingEnvVar(t *testing.T) {
 	os.Unsetenv("TEST_HEKA_TOKEN_MISSING")
 	_, err := Load(write(t, `

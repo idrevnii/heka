@@ -77,45 +77,58 @@ func run(configPath string, log *slog.Logger) error {
 		routes[name] = &proxy.Handler{
 			Name:   name,
 			Target: target,
-			KeyIn: proxy.KeyIn{
-				Header: p.KeyIn.Header,
-				Prefix: p.KeyIn.Prefix,
-				Query:  p.KeyIn.Query,
+			KeyIn:  p.KeyIn,
+			Pool:   pool,
+			Params: proxy.Params{
+				MaxRetries:    rot.MaxRetries,
+				MaxBodyBuffer: rot.MaxBodyBuffer,
+				CooldownOn:    rot.CooldownOn,
+				DisableOn:     rot.DisableOn,
 			},
-			Pool:      pool,
-			Params:    proxy.Params{MaxRetries: rot.MaxRetries, MaxBodyBuffer: rot.MaxBodyBuffer},
 			Transport: transport,
 			Log:       log,
 		}
 		pools[name] = pool
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	var supervisors []*sidecar.Supervisor
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		// Runs on every exit path, including startup errors: stop the
+		// children and wait so no sidecar is orphaned past os.Exit.
+		cancel()
+		for _, sup := range supervisors {
+			sup.Wait(8 * time.Second)
+		}
+	}()
+
 	sidecarStates := map[string]func() string{}
 	for name, sc := range cfg.Sidecar {
-		params := proxy.Params{MaxBodyBuffer: cfg.DefaultRotation().MaxBodyBuffer}
-		if sc.URL != "" {
-			target, err := url.Parse(sc.URL)
-			if err != nil {
-				return fmt.Errorf("sidecar %s: %w", name, err)
-			}
-			routes[sc.Route] = &proxy.Handler{
-				Name: name, Target: target, Params: params, Transport: transport, Log: log,
-			}
-			sidecarStates[name] = func() string { return "external" }
-			continue
+		rawURL := sc.URL
+		if rawURL == "" {
+			rawURL = fmt.Sprintf("http://127.0.0.1:%d", sc.Port)
 		}
-		sup := &sidecar.Supervisor{Name: name, Command: sc.Command, Port: sc.Port, Log: log}
+		target, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("sidecar %s: %w", name, err)
+		}
+		sup := &sidecar.Supervisor{Name: name, Command: sc.Command, Port: sc.Port, URL: sc.URL, Log: log}
 		sup.Start(ctx)
 		supervisors = append(supervisors, sup)
 		sidecarStates[name] = sup.State
-		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", sc.Port))
-		routes[sc.Route] = sidecar.Gate(sup, &proxy.Handler{
-			Name: name, Target: target, Params: params, Transport: transport, Log: log,
-		})
+
+		h := &proxy.Handler{
+			Name:      name,
+			Target:    target,
+			Params:    proxy.Params{MaxBodyBuffer: cfg.DefaultRotation().MaxBodyBuffer},
+			Transport: transport,
+			Log:       log,
+		}
+		if sc.Key != "" {
+			h.KeyIn = *sc.KeyIn
+			h.StaticKey = sc.Key
+		}
+		routes[sc.Route] = sidecar.Gate(sup, h)
 	}
 
 	srv := server.New(cfg.Auth.Tokens, routes, pools, sidecarStates, log)
@@ -145,10 +158,6 @@ func run(configPath string, log *slog.Logger) error {
 	defer shutdownCancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		log.Warn("shutdown", "error", err)
-	}
-	cancel()
-	for _, sup := range supervisors {
-		sup.Wait(8 * time.Second)
 	}
 	return nil
 }

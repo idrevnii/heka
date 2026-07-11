@@ -3,7 +3,6 @@ package server
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -52,58 +51,69 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, http.StatusNotFound, fmt.Sprintf("heka: unknown route %q", seg))
 		return
 	}
-	r2 := r.Clone(r.Context())
+	// Shallow copy: only the URL changes; the proxy clones headers itself.
+	r2 := new(http.Request)
+	*r2 = *r
+	u := *r.URL
 	dec, err := url.PathUnescape(rest)
 	if err != nil {
 		dec = rest
 	}
-	r2.URL.Path = dec
-	r2.URL.RawPath = ""
+	u.Path = dec
+	u.RawPath = ""
 	if dec != rest {
-		r2.URL.RawPath = rest
+		u.RawPath = rest
 	}
+	r2.URL = &u
 	h.ServeHTTP(w, r2)
 }
 
 // splitRoute splits "/anthropic/v1/messages" into "anthropic" and "/v1/messages".
 func splitRoute(escapedPath string) (seg, rest string) {
-	p := strings.TrimPrefix(escapedPath, "/")
-	if i := strings.IndexByte(p, '/'); i >= 0 {
-		return p[:i], p[i:]
-	}
-	return p, "/"
+	seg, rest, _ = strings.Cut(strings.TrimPrefix(escapedPath, "/"), "/")
+	return seg, "/" + rest
 }
 
+// authorized accepts the gateway token in any header a provider SDK would
+// naturally use for its key; every candidate present is checked.
 func (s *Server) authorized(r *http.Request) bool {
-	token := ""
+	var candidates []string
 	if ah := r.Header.Get("Authorization"); len(ah) > 7 && strings.EqualFold(ah[:7], "bearer ") {
-		token = strings.TrimSpace(ah[7:])
+		candidates = append(candidates, strings.TrimSpace(ah[7:]))
 	}
-	if token == "" {
-		token = r.Header.Get("X-Api-Key")
-	}
-	if token == "" {
-		return false
+	for _, header := range []string{"X-Api-Key", "X-Goog-Api-Key"} {
+		if v := r.Header.Get(header); v != "" {
+			candidates = append(candidates, v)
+		}
 	}
 	ok := false
-	for _, t := range s.tokens {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {
-			ok = true
+	for _, c := range candidates {
+		for _, t := range s.tokens {
+			if subtle.ConstantTimeCompare([]byte(c), []byte(t)) == 1 {
+				ok = true
+			}
 		}
 	}
 	return ok
 }
 
+func (s *Server) sidecarSnapshot() map[string]string {
+	if len(s.sidecarStates) == 0 {
+		return nil
+	}
+	states := map[string]string{}
+	for name, state := range s.sidecarStates {
+		states[name] = state()
+	}
+	return states
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	body := map[string]any{"status": "ok"}
-	if len(s.sidecarStates) > 0 {
-		states := map[string]string{}
-		for name, state := range s.sidecarStates {
-			states[name] = state()
-		}
+	if states := s.sidecarSnapshot(); states != nil {
 		body["sidecars"] = states
 	}
-	writeJSON(w, http.StatusOK, body)
+	proxy.WriteJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -116,14 +126,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		providers[name] = pool.Snapshot()
 	}
 	body := map[string]any{"providers": providers}
-	if len(s.sidecarStates) > 0 {
-		states := map[string]string{}
-		for name, state := range s.sidecarStates {
-			states[name] = state()
-		}
+	if states := s.sidecarSnapshot(); states != nil {
 		body["sidecars"] = states
 	}
-	writeJSON(w, http.StatusOK, body)
+	proxy.WriteJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
@@ -147,11 +153,5 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.log.Info("key state reset", "providers", reset)
-	writeJSON(w, http.StatusOK, map[string]any{"reset": reset})
-}
-
-func writeJSON(w http.ResponseWriter, code int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(body)
+	proxy.WriteJSON(w, http.StatusOK, map[string]any{"reset": reset})
 }

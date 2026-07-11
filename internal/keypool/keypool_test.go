@@ -39,7 +39,7 @@ func TestRoundRobin(t *testing.T) {
 func TestCooldownAndExpiry(t *testing.T) {
 	p, now := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
 	idx, _ := mustAcquire(t, p, nil)
-	if d := p.ReportRateLimited(idx, 0); d != time.Minute {
+	if d := p.ReportRateLimited(idx, 0, false); d != time.Minute {
 		t.Fatalf("first cooldown = %v, want 1m", d)
 	}
 	// While key 0 cools down, only key 1 is picked.
@@ -68,13 +68,13 @@ func TestExponentialCooldown(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute}
 	for _, w := range want {
-		if d := p.ReportRateLimited(0, 0); d != w {
+		if d := p.ReportRateLimited(0, 0, false); d != w {
 			t.Fatalf("cooldown = %v, want %v", d, w)
 		}
 	}
 	// Success resets the streak.
 	p.ReportSuccess(0)
-	if d := p.ReportRateLimited(0, 0); d != time.Minute {
+	if d := p.ReportRateLimited(0, 0, false); d != time.Minute {
 		t.Fatalf("cooldown after success = %v, want 1m", d)
 	}
 }
@@ -82,28 +82,28 @@ func TestExponentialCooldown(t *testing.T) {
 func TestCooldownCap(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	for range 30 {
-		p.ReportRateLimited(0, 0)
+		p.ReportRateLimited(0, 0, false)
 	}
-	if d := p.ReportRateLimited(0, 0); d != time.Hour {
+	if d := p.ReportRateLimited(0, 0, false); d != time.Hour {
 		t.Fatalf("cooldown = %v, want cap 1h", d)
 	}
 	// Retry-After above the cap is clamped too.
-	if d := p.ReportRateLimited(0, 24*time.Hour); d != time.Hour {
+	if d := p.ReportRateLimited(0, 24*time.Hour, true); d != time.Hour {
 		t.Fatalf("retry-after cooldown = %v, want cap 1h", d)
 	}
 }
 
 func TestRetryAfterWins(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
-	if d := p.ReportRateLimited(0, 7*time.Second); d != 7*time.Second {
+	if d := p.ReportRateLimited(0, 7*time.Second, true); d != 7*time.Second {
 		t.Fatalf("cooldown = %v, want 7s", d)
 	}
 }
 
 func TestAllCoolingPicksEarliest(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
-	p.ReportRateLimited(0, 10*time.Minute)
-	p.ReportRateLimited(1, time.Minute)
+	p.ReportRateLimited(0, 10*time.Minute, true)
+	p.ReportRateLimited(1, time.Minute, true)
 	if idx, _ := mustAcquire(t, p, nil); idx != 1 {
 		t.Fatalf("picked %d, want 1 (earliest cooldown)", idx)
 	}
@@ -141,7 +141,7 @@ func TestTriedExcluded(t *testing.T) {
 
 func TestSnapshotAndMask(t *testing.T) {
 	p, _ := testPool("sk-ant-api03-verysecret0001", "sk-ant-api03-verysecret0002")
-	p.ReportRateLimited(0, time.Minute)
+	p.ReportRateLimited(0, time.Minute, true)
 	p.ReportInvalid(1)
 	snap := p.Snapshot()
 	if snap[0].State != "cooldown" || snap[0].CooldownUntil == nil {
@@ -150,10 +150,36 @@ func TestSnapshotAndMask(t *testing.T) {
 	if snap[1].State != "disabled" {
 		t.Fatalf("key 1 state = %q, want disabled", snap[1].State)
 	}
-	if snap[0].Key != "sk-an…0001" {
+	if snap[0].Key != "sk-a…0001" {
 		t.Fatalf("masked key = %q", snap[0].Key)
 	}
-	if Mask("short") != "****" {
-		t.Fatalf("short keys must be fully masked, got %q", Mask("short"))
+	// Anything shorter than 16 chars would leak most of itself — fully mask.
+	for _, s := range []string{"short", "abcdef123456789"} {
+		if Mask(s) != "****" {
+			t.Fatalf("Mask(%q) = %q, want ****", s, Mask(s))
+		}
+	}
+}
+
+func TestSuccessClearsCooldown(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa")
+	p.ReportRateLimited(0, time.Hour, true)
+	if p.Snapshot()[0].State != "cooldown" {
+		t.Fatal("expected cooldown before success")
+	}
+	// The all-cooling fallback hands the key out; if it then works, it must
+	// return to normal rotation immediately.
+	p.ReportSuccess(0)
+	if st := p.Snapshot()[0].State; st != "active" {
+		t.Fatalf("state after success = %q, want active", st)
+	}
+}
+
+func TestRetryAfterZeroFloor(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa")
+	// "Retry-After: 0" is a provider-declared immediate retry, not a missing
+	// header — the exponential schedule must not kick in.
+	if d := p.ReportRateLimited(0, 0, true); d != time.Second {
+		t.Fatalf("cooldown = %v, want 1s floor", d)
 	}
 }

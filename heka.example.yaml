@@ -13,6 +13,8 @@ rotation:
   cooldown_max: 1h
   max_retries: 3        # max key switches per request
   max_body_buffer: 10MiB
+  # cooldown_on: [429]           # statuses that cool a key down + retry
+  # disable_on: [401, 402, 403]  # statuses that disable a key + retry
 
 providers:
   anthropic:
@@ -53,3 +55,6 @@ providers:
 #     port: 8317
 #     # ...or point at an already running instance instead of command/port:
 #     # url: http://127.0.0.1:8317
+#     # ...and if that instance requires its own api-key:
+#     # key_in: { header: Authorization, prefix: "Bearer " }
+#     # key: ${CLIPROXY_KEY}
