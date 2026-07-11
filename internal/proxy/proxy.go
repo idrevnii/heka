@@ -171,8 +171,13 @@ func (h *Handler) outbound(r *http.Request, secret string, buf []byte, replayabl
 		rest = "/" + rest
 	}
 	raw := h.Target.Scheme + "://" + h.Target.Host + basePath + rest
-	if r.URL.RawQuery != "" {
-		raw += "?" + r.URL.RawQuery
+	rawQuery := h.Target.RawQuery
+	if rawQuery != "" && r.URL.RawQuery != "" {
+		rawQuery += "&"
+	}
+	rawQuery += r.URL.RawQuery
+	if rawQuery != "" {
+		raw += "?" + rawQuery
 	}
 
 	var body io.Reader
@@ -207,17 +212,32 @@ func (h *Handler) outbound(r *http.Request, secret string, buf []byte, replayabl
 		case h.KeyIn.Header != "":
 			out.Header.Set(h.KeyIn.Header, h.KeyIn.Prefix+secret)
 		case h.KeyIn.Query != "":
-			// Append rather than re-encode: the client's query stays
-			// byte-for-byte intact (passthrough guarantee).
-			kv := url.QueryEscape(h.KeyIn.Query) + "=" + url.QueryEscape(secret)
-			if out.URL.RawQuery == "" {
-				out.URL.RawQuery = kv
-			} else {
-				out.URL.RawQuery += "&" + kv
-			}
+			out.URL.RawQuery = replaceQueryParam(out.URL.RawQuery, h.KeyIn.Query, secret)
 		}
 	}
 	return out, nil
+}
+
+// replaceQueryParam removes every existing value for name and appends the
+// provider value. Unrelated fields retain their original order and encoding.
+func replaceQueryParam(rawQuery, name, value string) string {
+	kv := url.QueryEscape(name) + "=" + url.QueryEscape(value)
+	if rawQuery == "" {
+		return kv
+	}
+
+	parts := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(parts)+1)
+	for _, part := range parts {
+		escapedName, _, _ := strings.Cut(part, "=")
+		decodedName, err := url.QueryUnescape(escapedName)
+		if err == nil && decodedName == name {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	kept = append(kept, kv)
+	return strings.Join(kept, "&")
 }
 
 func (h *Handler) report(v verdict, idx int, resp *http.Response) {

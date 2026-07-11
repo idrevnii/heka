@@ -138,6 +138,43 @@ func TestKeyPrefixAndQueryInjection(t *testing.T) {
 	}
 }
 
+func TestQueryKeyReplacesClientValues(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Query: "key"}, key1)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		"GET", "/v1beta/models?key=client&zeta=%2B1&k%65y=other&alpha=2", nil))
+
+	got := up.requests[0].URL
+	want := "zeta=%2B1&alpha=2&key=" + key1
+	if got.RawQuery != want {
+		t.Fatalf("RawQuery = %q, want %q", got.RawQuery, want)
+	}
+	if values := got.Query()["key"]; len(values) != 1 || values[0] != key1 {
+		t.Fatalf("key values = %q, want only provider key", values)
+	}
+}
+
+func TestBaseURLQueryIsPreserved(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusOK)
+	})
+	target := up.srv.URL + "/root?api-version=2025-01-01&fixed=%2B1"
+	h, _ := newHandler(t, target, config.KeyIn{Query: "key"}, key1)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(
+		"GET", "/models?zeta=%2B2&alpha=3", nil))
+
+	got := up.requests[0].URL
+	if got.Path != "/root/models" {
+		t.Fatalf("Path = %q, want %q", got.Path, "/root/models")
+	}
+	want := "api-version=2025-01-01&fixed=%2B1&zeta=%2B2&alpha=3&key=" + key1
+	if got.RawQuery != want {
+		t.Fatalf("RawQuery = %q, want %q", got.RawQuery, want)
+	}
+}
+
 func TestRotationOn429(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if r.Header.Get("X-Api-Key") == key1 {

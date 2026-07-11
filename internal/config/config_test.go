@@ -97,6 +97,30 @@ providers:
 	}
 }
 
+func TestUnquotedEnvValueRemainsString(t *testing.T) {
+	for _, secret := range []string{"null", "true", "123", "[yaml]"} {
+		t.Run(secret, func(t *testing.T) {
+			t.Setenv("TEST_UNQUOTED_SECRET", secret)
+			cfg, err := Load(write(t, `
+auth:
+  tokens:
+    - ${TEST_UNQUOTED_SECRET}
+providers:
+  p:
+    base_url: https://example.com
+    key_in: { header: x-api-key }
+    keys: [ "k-something-long" ]
+`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Auth.Tokens[0]; got != secret {
+				t.Fatalf("secret = %q, want %q", got, secret)
+			}
+		})
+	}
+}
+
 // ${VAR} inside comments is inert; $${VAR} passes a literal ${VAR} through.
 func TestEnvExpansionCommentsAndEscape(t *testing.T) {
 	os.Unsetenv("TEST_COMMENTED_OUT_KEY")

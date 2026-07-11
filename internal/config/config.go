@@ -181,13 +181,10 @@ func expandEnvNode(n *yaml.Node, missing *[]string) {
 		})
 		if expanded != n.Value {
 			n.Value = expanded
-			// Quoted scalars must stay strings; plain ones re-resolve on
-			// the second parse (so `port: ${PORT}` still becomes an int).
-			if n.Style == yaml.DoubleQuotedStyle || n.Style == yaml.SingleQuotedStyle {
-				n.Tag = "!!str"
-			} else {
-				n.Tag = ""
-			}
+			// Environment values are opaque strings. In particular, a plain
+			// value such as `null`, `true`, or `123` must not be retyped when
+			// the expanded document is parsed again.
+			n.Tag = "!!str"
 		}
 		return
 	}
