@@ -53,6 +53,7 @@ providers:
 #     route: oauth
 #     command: [ "cli-proxy-api", "--config", "/etc/cliproxy/config.yaml" ]
 #     port: 8317
+#     health_interval: 30s
 #     # ...or point at an already running instance instead of command/port:
 #     # url: http://127.0.0.1:8317
 #     # ...and if that instance requires its own api-key:

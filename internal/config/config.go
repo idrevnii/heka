@@ -64,10 +64,11 @@ type KeyIn struct {
 }
 
 type Sidecar struct {
-	Route   string   `yaml:"route"`
-	Command []string `yaml:"command"`
-	Port    int      `yaml:"port"`
-	URL     string   `yaml:"url"`
+	Route          string    `yaml:"route"`
+	Command        []string  `yaml:"command"`
+	Port           int       `yaml:"port"`
+	URL            string    `yaml:"url"`
+	HealthInterval *Duration `yaml:"health_interval"`
 	// Optional static key injected into sidecar requests (for CLIProxyAPI
 	// instances that require their own api-key). No rotation.
 	KeyIn *KeyIn `yaml:"key_in"`

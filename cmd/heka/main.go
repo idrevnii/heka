@@ -112,7 +112,18 @@ func run(configPath string, log *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("sidecar %s: %w", name, err)
 		}
-		sup := &sidecar.Supervisor{Name: name, Command: sc.Command, Port: sc.Port, URL: sc.URL, Log: log}
+		var healthInterval time.Duration
+		if sc.HealthInterval != nil {
+			healthInterval = time.Duration(*sc.HealthInterval)
+		}
+		sup := &sidecar.Supervisor{
+			Name:     name,
+			Command:  sc.Command,
+			Port:     sc.Port,
+			URL:      sc.URL,
+			Interval: healthInterval,
+			Log:      log,
+		}
 		sup.Start(ctx)
 		supervisors = append(supervisors, sup)
 		sidecarStates[name] = sup.State

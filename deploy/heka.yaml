@@ -1,0 +1,21 @@
+listen: "0.0.0.0:8787"
+
+auth:
+  tokens:
+    - "${HEKA_TOKEN}"
+
+rotation:
+  cooldown_base: 60s
+  cooldown_max: 1h
+  max_retries: 3
+  max_body_buffer: 10MiB
+
+sidecar:
+  cliproxy:
+    route: oauth
+    url: http://cliproxyapi:8317
+    health_interval: 30s
+    key_in:
+      header: Authorization
+      prefix: "Bearer "
+    key: "${CLIPROXY_API_KEY}"

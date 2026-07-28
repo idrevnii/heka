@@ -39,6 +39,7 @@ sidecar:
     route: oauth
     command: [ "cli-proxy-api" ]
     port: 8317
+    health_interval: 30s
 `
 
 func TestLoadValid(t *testing.T) {
@@ -72,6 +73,9 @@ func TestLoadValid(t *testing.T) {
 	}
 	if cfg.Sidecar["cliproxy"].Route != "oauth" {
 		t.Fatalf("sidecar route = %q", cfg.Sidecar["cliproxy"].Route)
+	}
+	if got := time.Duration(*cfg.Sidecar["cliproxy"].HealthInterval); got != 30*time.Second {
+		t.Fatalf("sidecar health interval = %v", got)
 	}
 }
 

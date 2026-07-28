@@ -1,0 +1,94 @@
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  heka:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      HEKA_TOKEN: "${SERVICE_PASSWORD_64_HEKA}"
+      CLIPROXY_API_KEY: "${SERVICE_PASSWORD_64_CLIPROXY}"
+      COOLIFY_APP_NAME: heka
+    ports:
+      - "${HEKA_BIND_ADDRESS:-10.40.0.10}:${HEKA_PORT:-8787}:8787"
+    depends_on:
+      cliproxyapi:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  cliproxyapi:
+    image: eceasy/cli-proxy-api:v7.2.100
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Moscow
+      COOLIFY_APP_NAME: cliproxyapi
+    expose:
+      - "8317"
+    configs:
+      - source: cliproxy-config
+        target: /CLIProxyAPI/config.yaml
+    volumes:
+      - cliproxy-auth:/root/.cli-proxy-api
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+configs:
+  cliproxy-config:
+    content: |
+      host: "0.0.0.0"
+      port: 8317
+
+      remote-management:
+        allow-remote: false
+        secret-key: ""
+        disable-control-panel: true
+        disable-auto-update-panel: true
+
+      auth-dir: "/root/.cli-proxy-api"
+
+      api-keys:
+        - "${SERVICE_PASSWORD_64_CLIPROXY}"
+
+      debug: false
+      request-log: false
+      logging-to-file: false
+      usage-statistics-enabled: false
+
+      request-retry: 3
+      routing:
+        strategy: round-robin
+
+      streaming:
+        keepalive-seconds: 15
+        bootstrap-retries: 1
+
+volumes:
+  cliproxy-auth:
+    name: heka-cliproxy-auth
