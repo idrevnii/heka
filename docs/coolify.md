@@ -32,9 +32,10 @@ configuration at startup and currently requires a restart after changes.
 
 ## OAuth login
 
-OAuth credentials are stored in the persistent Docker volume
-`heka-cliproxy-auth`. Run login commands on the server with the same pinned
-CLIProxyAPI image and volume.
+OAuth credentials are stored in
+`/data/apps/heka/cliproxy-auth` on the persistent `apps-data` Incus volume.
+Run login commands on the server with the same pinned CLIProxyAPI image and
+bind mount.
 
 ### Grok
 
@@ -49,7 +50,7 @@ In another terminal, start the login flow on the server:
 ```sh
 ssh -t apps \
   "sudo docker run --rm -it --network host \
-  -v heka-cliproxy-auth:/root/.cli-proxy-api \
+  -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
   eceasy/cli-proxy-api:v7.2.100 \
   ./CLIProxyAPI --xai-login --no-browser"
 ```
@@ -70,7 +71,7 @@ Then run:
 ```sh
 ssh -t apps \
   "sudo docker run --rm -it --network host \
-  -v heka-cliproxy-auth:/root/.cli-proxy-api \
+  -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
   eceasy/cli-proxy-api:v7.2.100 \
   ./CLIProxyAPI --codex-login --no-browser"
 ```
@@ -121,8 +122,8 @@ detailed request logging are disabled.
 ## Persistence and backup
 
 The only state that must survive redeployments is
-`heka-cliproxy-auth`. Back it up separately from Coolify itself because
-Coolify instance backups do not include application volumes.
+`/data/apps/heka/cliproxy-auth`. Cuprum includes the containing `apps-data`
+volume in its restic backup.
 
 Traffic is plain HTTP on the trusted private network. Do not expose port
 `8787` through NAT or a public interface. Add TLS or a private VPN before
