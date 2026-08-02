@@ -30,6 +30,24 @@ providers:
     rotation:
       max_retries: 9
 
+  opencode-go-anthropic:
+    base_url: https://opencode.ai/zen/go
+    key_in:
+      header: x-api-key
+    keys:
+      - "${OPENCODE_GO_KEY_1}"
+      - "${OPENCODE_GO_KEY_2}"
+      - "${OPENCODE_GO_KEY_3}"
+      - "${OPENCODE_GO_KEY_4}"
+      - "${OPENCODE_GO_KEY_5}"
+      - "${OPENCODE_GO_KEY_6}"
+      - "${OPENCODE_GO_KEY_7}"
+      - "${OPENCODE_GO_KEY_8}"
+      - "${OPENCODE_GO_KEY_9}"
+      - "${OPENCODE_GO_KEY_10}"
+    rotation:
+      max_retries: 9
+
 sidecar:
   cliproxy:
     route: oauth
