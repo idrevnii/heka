@@ -102,24 +102,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r2)
 }
 
-// serveDashboard authorizes and dispatches everything under /dashboard. In
-// addition to the normal bearer-token check, GET requests may authenticate
-// via a ?token= query parameter — browsers can't easily set custom headers
-// for a page navigation — but that carve-out is strictly scoped to this
-// prefix and to GET, so it never widens the proxy/status API's posture.
+// serveDashboard dispatches everything under /dashboard. The static shell
+// (HTML/CSS/JS) carries no secrets and is served without authentication —
+// the alternative, accepting the gateway token via a ?token= query
+// parameter so a browser navigation could authenticate, means the token
+// ends up in server access logs and the address bar, which isn't worth it
+// just to gate a static page. The JSON API under /dashboard/api/ is what
+// actually needs protecting, and requires the normal bearer token: the
+// page's own JS prompts for it and sends it as an Authorization header on
+// every fetch, never as part of a URL.
 func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Request) {
 	dash := s.dash.Load()
 	if dash == nil {
 		proxy.WriteError(w, http.StatusNotFound, "heka: dashboard is disabled")
-		return
-	}
-	ok := s.authorized(st, r)
-	if !ok && r.Method == http.MethodGet {
-		ok = matchToken(st.Tokens, r.URL.Query().Get("token"))
-	}
-	if !ok {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		proxy.WriteError(w, http.StatusUnauthorized, "heka: missing or invalid gateway token")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -127,6 +122,12 @@ func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Reques
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:")
+
+	if strings.HasPrefix(r.URL.Path, "/dashboard/api/") && !s.authorized(st, r) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		proxy.WriteError(w, http.StatusUnauthorized, "heka: missing or invalid gateway token")
+		return
+	}
 	(*dash).ServeHTTP(w, r)
 }
 

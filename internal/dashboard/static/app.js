@@ -2,21 +2,10 @@
 
 // --- token handling -------------------------------------------------------
 // The gateway token authenticates every fetch below via the Authorization
-// header. On first load it may arrive as ?token=... (server.go accepts that
-// only for GET /dashboard*) — stash it and strip it from the visible URL
-// immediately so it doesn't linger in browser history longer than needed.
+// header, entered once through the prompt below and kept in sessionStorage
+// for the tab's lifetime. It is deliberately never accepted via the URL
+// (query params end up in server access logs and browser history).
 const TOKEN_KEY = "heka_dashboard_token";
-
-function initToken() {
-  const url = new URL(window.location.href);
-  const fromQuery = url.searchParams.get("token");
-  if (fromQuery) {
-    sessionStorage.setItem(TOKEN_KEY, fromQuery);
-    url.searchParams.delete("token");
-    history.replaceState(null, "", url.pathname + url.search + url.hash);
-  }
-}
-initToken();
 
 function getToken() {
   return sessionStorage.getItem(TOKEN_KEY) || "";

@@ -33,9 +33,10 @@ effect on an already-deployed instance.
 Ongoing changes — adding a provider, rotating keys, tweaking rotation
 policy — go through either of:
 
-- the dashboard's config editor at `http://10.40.0.10:8787/dashboard`
-  (bearer token via the usual header, or open the link with `?token=...`
-  appended once — the page moves it out of the URL bar immediately); or
+- the dashboard's config editor at `http://10.40.0.10:8787/dashboard` — the
+  page itself is unauthenticated (it carries no secrets), but it prompts for
+  the gateway token on first load and sends it as a normal `Authorization`
+  header on every API call from then on; the token is never put in the URL;
 - editing `/data/apps/heka/config/heka.yaml` directly on the host and
   waiting for Heka's file watcher to pick it up (within `dashboard.watch`,
   10s by default), or sending it `SIGHUP`.
