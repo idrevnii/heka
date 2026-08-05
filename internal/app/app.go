@@ -373,7 +373,7 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 		capture := cfg.CaptureFor(name)
 		poolFP := fingerprint(p.Keys, rot.CooldownBase, rot.CooldownMax)
 		handlerFP := fingerprint(p.BaseURL, p.KeyIn, rot.MaxRetries, rot.MaxBodyBuffer,
-			rot.CooldownOn, rot.DisableOn, capture)
+			rot.CooldownOn, rot.DisableOn, rot.Affinity, capture)
 
 		prev, existed := a.providers[name]
 
@@ -404,6 +404,7 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 					CooldownOn:    rot.CooldownOn,
 					DisableOn:     rot.DisableOn,
 				},
+				Affinity:  rot.Affinity,
 				Capture:   capture,
 				History:   a.opts.History,
 				Transport: a.opts.Transport,

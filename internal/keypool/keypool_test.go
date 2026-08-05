@@ -175,6 +175,124 @@ func TestSuccessClearsCooldown(t *testing.T) {
 	}
 }
 
+func TestAffinityIsStable(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	first, _, ok := p.AcquireFor(42, nil)
+	if !ok {
+		t.Fatal("AcquireFor: no key available")
+	}
+	for range 10 {
+		if idx, _, _ := p.AcquireFor(42, nil); idx != first {
+			t.Fatalf("bound key moved: %d, want %d", idx, first)
+		}
+	}
+	// Unbound traffic in between must not drag the binding along.
+	mustAcquire(t, p, nil)
+	mustAcquire(t, p, nil)
+	if idx, _, _ := p.AcquireFor(42, nil); idx != first {
+		t.Fatalf("bound key moved after round-robin traffic: %d, want %d", idx, first)
+	}
+}
+
+func TestAffinitySpreadsAcrossKeys(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	counts := map[int]int{}
+	const n = 600
+	for i := range n {
+		idx, _, _ := p.AcquireFor(uint64(i)*0x9e3779b1, nil)
+		counts[idx]++
+	}
+	if len(counts) != 3 {
+		t.Fatalf("affinity used %d of 3 keys: %v", len(counts), counts)
+	}
+	// Rendezvous hashing is not exact, but a third of the load ±50% is a
+	// generous band; anything outside it means the mix is degenerate.
+	for idx, c := range counts {
+		if c < n/3/2 || c > n/3*3/2 {
+			t.Fatalf("key %d got %d of %d requests: %v", idx, c, n, counts)
+		}
+	}
+}
+
+func TestAffinityMinimalDisruption(t *testing.T) {
+	p, now := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	before := map[uint64]int{}
+	for i := range uint64(300) {
+		idx, _, _ := p.AcquireFor(i, nil)
+		before[i] = idx
+	}
+	// Bench one key: only the sessions bound to it may move.
+	p.ReportRateLimited(0, 10*time.Minute, true)
+	moved, stayed := 0, 0
+	for i, was := range before {
+		idx, _, _ := p.AcquireFor(i, nil)
+		if idx == 0 {
+			t.Fatalf("affinity %d picked cooling key 0", i)
+		}
+		if idx == was {
+			stayed++
+		} else {
+			if was != 0 {
+				t.Fatalf("affinity %d moved from live key %d to %d", i, was, idx)
+			}
+			moved++
+		}
+	}
+	if moved == 0 || stayed == 0 {
+		t.Fatalf("moved %d, stayed %d — expected a partial remap", moved, stayed)
+	}
+	// ...and everything comes back once the key is healthy again.
+	*now = now.Add(11 * time.Minute)
+	for i, was := range before {
+		if idx, _, _ := p.AcquireFor(i, nil); idx != was {
+			t.Fatalf("affinity %d = %d after cooldown expiry, want %d", i, idx, was)
+		}
+	}
+}
+
+func TestAffinityIgnoresKeyOrder(t *testing.T) {
+	a, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	b, _ := testPool("cccccccccccccccc", "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	for i := range uint64(50) {
+		_, s1, _ := a.AcquireFor(i, nil)
+		_, s2, _ := b.AcquireFor(i, nil)
+		if s1 != s2 {
+			t.Fatalf("affinity %d picked different secrets after reorder", i)
+		}
+	}
+}
+
+func TestAffinityRetryIsDeterministic(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc")
+	first, _, _ := p.AcquireFor(7, nil)
+	second, _, ok := p.AcquireFor(7, map[int]bool{first: true})
+	if !ok || second == first {
+		t.Fatalf("retry key = %d ok=%v, want another key", second, ok)
+	}
+	for range 5 {
+		if idx, _, _ := p.AcquireFor(7, map[int]bool{first: true}); idx != second {
+			t.Fatalf("retry key moved: %d, want %d", idx, second)
+		}
+	}
+	if _, _, ok := p.AcquireFor(7, map[int]bool{0: true, 1: true, 2: true}); ok {
+		t.Fatal("AcquireFor succeeded with all keys tried")
+	}
+}
+
+func TestAffinityAllCoolingFallback(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	p.ReportRateLimited(0, 10*time.Minute, true)
+	p.ReportRateLimited(1, time.Minute, true)
+	if idx, _, _ := p.AcquireFor(1, nil); idx != 1 {
+		t.Fatalf("picked %d, want 1 (earliest cooldown)", idx)
+	}
+	p.ReportInvalid(0)
+	p.ReportInvalid(1)
+	if _, _, ok := p.AcquireFor(1, nil); ok {
+		t.Fatal("AcquireFor succeeded with all keys disabled")
+	}
+}
+
 func TestRetryAfterZeroFloor(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	// "Retry-After: 0" is a provider-declared immediate retry, not a missing

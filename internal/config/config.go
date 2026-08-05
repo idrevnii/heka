@@ -159,6 +159,7 @@ type Rotation struct {
 	MaxBodyBuffer *Size     `yaml:"max_body_buffer"`
 	CooldownOn    []int     `yaml:"cooldown_on"`
 	DisableOn     []int     `yaml:"disable_on"`
+	Affinity      *Affinity `yaml:"affinity"`
 }
 
 // RotationParams is a fully resolved rotation policy.
@@ -169,6 +170,23 @@ type RotationParams struct {
 	MaxBodyBuffer int64
 	CooldownOn    []int
 	DisableOn     []int
+	Affinity      AffinityParams
+}
+
+// Affinity configures session stickiness: binding requests that share a
+// cacheable prompt prefix to one key, so upstream prompt caches (which live
+// per key) actually get hit instead of being rewritten on every turn.
+type Affinity struct {
+	Enabled *bool `yaml:"enabled"`
+	// Header names an explicit affinity key supplied by the client; empty
+	// means derive the binding from the request body only.
+	Header *string `yaml:"header"`
+}
+
+// AffinityParams is a fully resolved affinity policy.
+type AffinityParams struct {
+	Enabled bool
+	Header  string
 }
 
 type Provider struct {
@@ -424,6 +442,7 @@ func (c *Config) DefaultRotation() RotationParams {
 		MaxBodyBuffer: 10 << 20,
 		CooldownOn:    []int{429},
 		DisableOn:     []int{401, 402, 403},
+		Affinity:      AffinityParams{Enabled: true, Header: "X-Heka-Affinity"},
 	}
 	c.Rotation.apply(&p)
 	return p
@@ -462,6 +481,14 @@ func (r *Rotation) apply(p *RotationParams) {
 	if r.DisableOn != nil {
 		p.DisableOn = r.DisableOn
 	}
+	if a := r.Affinity; a != nil {
+		if a.Enabled != nil {
+			p.Affinity.Enabled = *a.Enabled
+		}
+		if a.Header != nil {
+			p.Affinity.Header = *a.Header
+		}
+	}
 }
 
 func (r *Rotation) validate(where string) error {
@@ -478,8 +505,16 @@ func (r *Rotation) validate(where string) error {
 			}
 		}
 	}
+	if a := r.Affinity; a != nil && a.Header != nil && *a.Header != "" {
+		if !headerRe.MatchString(*a.Header) {
+			return fmt.Errorf("%s: affinity.header %q is not a valid header name", where, *a.Header)
+		}
+	}
 	return nil
 }
+
+// headerRe matches an HTTP field name (RFC 9110 token).
+var headerRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
 
 func validateHTTPURL(raw, where string) error {
 	u, err := url.Parse(raw)

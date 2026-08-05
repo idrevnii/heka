@@ -15,6 +15,9 @@ rotation:
   max_body_buffer: 10MiB
   # cooldown_on: [429]           # statuses that cool a key down + retry
   # disable_on: [401, 402, 403]  # statuses that disable a key + retry
+  # affinity:                    # stick a conversation to one key (default on)
+  #   enabled: true              #   set false for plain round-robin
+  #   header: X-Heka-Affinity    #   client-supplied binding; "" to ignore it
 
 providers:
   anthropic:

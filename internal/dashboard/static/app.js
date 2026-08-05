@@ -164,6 +164,7 @@ async function loadOverview() {
             el("td", {}, [el("span", { class: "pill " + k.state }, [k.state])]),
             el("td", {}, [String(k.successes) + " ok"]),
             el("td", {}, [String(k.failures) + " fail"]),
+            el("td", { class: "cache", title: cacheTitle(k) }, [fmtCache(k)]),
           ])
         );
       }
@@ -230,10 +231,38 @@ async function loadRequests() {
       el("td", { class: statusClass(r.status) }, [String(r.status)]),
       el("td", {}, [String(r.attempts)]),
       el("td", {}, [String(r.duration_ms)]),
+      el("td", { class: "cache" }, [fmtTokens(r)]),
     ]);
     tr.addEventListener("click", () => showRequestDetail(r.id));
     tbody.appendChild(tr);
   }
+}
+
+// Cache hit rate is the payoff of key affinity: a pool answering from warm
+// prompt caches reads most of its input tokens instead of paying for them.
+function fmtCache(k) {
+  if (k.cache_hit_rate === null || k.cache_hit_rate === undefined) return "–";
+  return Math.round(k.cache_hit_rate * 100) + "% cached";
+}
+
+function cacheTitle(k) {
+  return "input " + fmtNum(k.input_tokens) +
+    " · cache read " + fmtNum(k.cache_read_tokens) +
+    " · cache write " + fmtNum(k.cache_write_tokens) +
+    " · output " + fmtNum(k.output_tokens);
+}
+
+function fmtTokens(r) {
+  if (!r.input_tokens) return "";
+  const pct = Math.round(((r.cache_read_tokens || 0) / r.input_tokens) * 100);
+  return fmtNum(r.input_tokens) + " in / " + pct + "% cached";
+}
+
+function fmtNum(n) {
+  n = n || 0;
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
 }
 
 async function showRequestDetail(id) {
@@ -252,6 +281,12 @@ async function showRequestDetail(id) {
   lines.push("route=" + rec.route + " kind=" + rec.kind + " status=" + rec.status +
     " attempts=" + rec.attempts + " duration=" + rec.duration_ms + "ms");
   if (rec.key) lines.push("key=" + rec.key);
+  if (rec.input_tokens) {
+    lines.push("tokens: input=" + rec.input_tokens +
+      " (cache read=" + (rec.cache_read_tokens || 0) +
+      ", cache write=" + (rec.cache_write_tokens || 0) + ")" +
+      " output=" + (rec.output_tokens || 0));
+  }
   if (rec.verdict) lines.push("verdict=" + rec.verdict);
   if (rec.error) lines.push("error=" + rec.error);
   if (rec.streaming) lines.push("(streaming response)");

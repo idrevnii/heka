@@ -28,6 +28,14 @@ type Record struct {
 	Verdict  string    `json:"verdict,omitempty"`
 	Err      string    `json:"error,omitempty"`
 
+	// Token accounting as reported by the provider, zero when it reported
+	// none (a search API, an error response, a body heka couldn't read).
+	// InputTokens includes CacheReadTokens.
+	InputTokens      uint64 `json:"input_tokens,omitempty"`
+	CacheReadTokens  uint64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens uint64 `json:"cache_write_tokens,omitempty"`
+	OutputTokens     uint64 `json:"output_tokens,omitempty"`
+
 	Streaming bool   `json:"streaming"`
 	ReqCT     string `json:"req_content_type,omitempty"`
 	RespCT    string `json:"resp_content_type,omitempty"`

@@ -176,6 +176,57 @@ providers:
 	}
 }
 
+func TestAffinityOverrides(t *testing.T) {
+	bare, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+providers:
+  p: { base_url: "https://example.com", key_in: { header: h }, keys: [ "k" ] }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// On by default, so pools benefit from prompt-cache stickiness without
+	// anyone having to know the option exists.
+	if got := bare.RotationFor("p").Affinity; !got.Enabled || got.Header != "X-Heka-Affinity" {
+		t.Fatalf("default affinity = %+v", got)
+	}
+
+	cfg, err := Load(write(t, `
+auth: { tokens: [ "t" ] }
+rotation:
+  affinity:
+    header: X-Session
+providers:
+  chat:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+  search:
+    base_url: https://example.com
+    key_in: { header: h }
+    keys: [ "k" ]
+    rotation:
+      affinity: { enabled: false }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RotationFor("chat").Affinity; !got.Enabled || got.Header != "X-Session" {
+		t.Fatalf("chat affinity = %+v", got)
+	}
+	if got := cfg.RotationFor("search").Affinity; got.Enabled {
+		t.Fatalf("search affinity = %+v, want disabled", got)
+	}
+
+	loadErr(t, `
+auth: { tokens: [ "t" ] }
+rotation:
+  affinity: { header: "not a header" }
+providers:
+  p: { base_url: "https://example.com", key_in: { header: h }, keys: [ "k" ] }
+`, "not a valid header name")
+}
+
 func TestSidecarKeyValidation(t *testing.T) {
 	loadErr(t, `
 auth: { tokens: [ "t" ] }

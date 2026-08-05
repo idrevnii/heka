@@ -42,6 +42,7 @@ type Handler struct {
 	Pool      *keypool.Pool
 	StaticKey string
 	Params    Params
+	Affinity  config.AffinityParams
 	Capture   config.CaptureParams
 	History   *history.Store // nil-safe; no history is recorded when nil
 	Transport http.RoundTripper
@@ -93,9 +94,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqSink := captureRequest(buf, replayable, h.Capture)
 
 	keyIdx, secret := -1, h.StaticKey
+	affinity, bound := uint64(0), false
 	if h.Pool != nil {
 		var ok bool
-		keyIdx, secret, ok = h.Pool.Acquire(nil)
+		affinity, bound = affinityOf(r, buf, h.Affinity)
+		keyIdx, secret, ok = h.acquire(affinity, bound, nil)
 		if !ok {
 			WriteError(w, http.StatusServiceUnavailable,
 				fmt.Sprintf("heka: no usable keys for provider %q (all disabled)", h.Name))
@@ -139,7 +142,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if v == vOK || h.Pool == nil || !replayable || attempts > h.Params.MaxRetries {
 			break
 		}
-		nextIdx, nextSecret, ok := h.Pool.Acquire(tried)
+		nextIdx, nextSecret, ok := h.acquire(affinity, bound, tried)
 		if !ok {
 			break
 		}
@@ -171,13 +174,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Capture.Body && (!streaming || h.Capture.Streaming) {
 		respSink = newSink(h.Capture.MaxBytes)
 	}
-	copyResponse(w, resp, respSink)
+	var scanner *usageScanner
+	if lastV == vOK {
+		scanner = newUsageScanner(resp)
+	}
+	copyResponse(w, resp, respSink, scanner)
+	usage := scanner.close()
+	if h.Pool != nil && keyIdx >= 0 {
+		h.Pool.ReportUsage(keyIdx, usage)
+	}
 	h.finish(r, start, finishInfo{
 		status: resp.StatusCode, attempts: attempts, keyIdx: keyIdx, verdict: lastV.String(),
-		reqBody: reqSink, respBody: respSink, streaming: streaming,
+		reqBody: reqSink, respBody: respSink, streaming: streaming, usage: usage,
 		reqCT: r.Header.Get("Content-Type"), respCT: resp.Header.Get("Content-Type"),
 		respEnc: resp.Header.Get("Content-Encoding"),
 	})
+}
+
+// acquire picks the next key, honouring the request's affinity when one
+// could be derived. Retries keep the same affinity: rendezvous hashing then
+// gives a stable second choice, so a conversation that loses its key lands
+// on the same replacement every time instead of scattering.
+func (h *Handler) acquire(affinity uint64, bound bool, tried map[int]bool) (int, string, bool) {
+	if bound {
+		return h.Pool.AcquireFor(affinity, tried)
+	}
+	return h.Pool.Acquire(tried)
 }
 
 // readBody buffers up to MaxBodyBuffer bytes. When the body fits, it is
@@ -240,6 +262,10 @@ func (h *Handler) outbound(r *http.Request, secret string, buf []byte, replayabl
 	out.Header.Del("Authorization")
 	out.Header.Del("X-Api-Key")
 	out.Header.Del("X-Goog-Api-Key")
+	// A gateway-level routing hint; the upstream has no use for it.
+	if h.Affinity.Header != "" {
+		out.Header.Del(h.Affinity.Header)
+	}
 	if secret != "" {
 		switch {
 		case h.KeyIn.Header != "":
@@ -336,7 +362,7 @@ func isStreaming(resp *http.Response) bool {
 // copyResponse streams resp's body to w. When sink is non-nil, every chunk
 // written to the client is also (best-effort, size-capped) mirrored into it
 // for the dashboard's request history.
-func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink) {
+func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink, usage *usageScanner) {
 	stripHopByHop(resp.Header)
 	maps.Copy(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -352,6 +378,7 @@ func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink) {
 				return
 			}
 			sink.Write(buf[:n])
+			usage.Write(buf[:n])
 			if streaming {
 				rc.Flush()
 			}
@@ -452,6 +479,7 @@ type finishInfo struct {
 	reqCT, respCT, respEnc   string
 	streaming                bool
 	reqBody, respBody        *sink
+	usage                    keypool.Usage
 }
 
 // finish is the single exit point for every ServeHTTP return path: it logs
@@ -491,6 +519,11 @@ func (h *Handler) finish(r *http.Request, start time.Time, fi finishInfo) {
 		ReqCT:     fi.reqCT,
 		RespCT:    fi.respCT,
 		RespEnc:   fi.respEnc,
+
+		InputTokens:      fi.usage.Input,
+		CacheReadTokens:  fi.usage.CacheRead,
+		CacheWriteTokens: fi.usage.CacheWrite,
+		OutputTokens:     fi.usage.Output,
 	}
 	if h.Pool != nil && fi.keyIdx >= 0 {
 		rec.Key = h.Pool.MaskedKey(fi.keyIdx)

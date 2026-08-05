@@ -118,6 +118,8 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: rgba(91, 157, 255, 0.08); }
 
+td.cache { color: var(--muted); }
+
 .status-2xx { color: var(--ok); }
 .status-3xx { color: var(--accent); }
 .status-4xx { color: var(--warn); }
