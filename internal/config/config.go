@@ -3,12 +3,16 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +26,125 @@ type Config struct {
 	Rotation  *Rotation            `yaml:"rotation"`
 	Providers map[string]*Provider `yaml:"providers"`
 	Sidecar   map[string]*Sidecar  `yaml:"sidecar"`
+	History   *History             `yaml:"history"`
+	Dashboard *Dashboard           `yaml:"dashboard"`
+}
+
+// History configures the in-memory request/error ring buffers used by the
+// dashboard. All fields are optional; unset ones fall back to the defaults
+// documented on HistoryParams.
+type History struct {
+	Size     *int  `yaml:"size"`
+	Errors   *int  `yaml:"errors"`
+	MaxBytes *Size `yaml:"max_bytes"`
+}
+
+// HistoryParams is a fully resolved history policy.
+type HistoryParams struct {
+	Size     int
+	Errors   int
+	MaxBytes int64
+}
+
+// Dashboard configures the embedded web dashboard.
+type Dashboard struct {
+	Enabled    *bool     `yaml:"enabled"`
+	ConfigEdit *bool     `yaml:"config_edit"`
+	Watch      *Duration `yaml:"watch"`
+}
+
+// DashboardParams is a fully resolved dashboard policy.
+type DashboardParams struct {
+	Enabled    bool
+	ConfigEdit bool
+	Watch      time.Duration
+}
+
+// Capture configures opt-in request/response body capture for the
+// dashboard's request history. Disabled by default: bodies may contain
+// secrets or user data, so this is a deliberate per-route decision.
+type Capture struct {
+	Body      *bool `yaml:"body"`
+	MaxBytes  *Size `yaml:"max_bytes"`
+	Streaming *bool `yaml:"streaming"`
+}
+
+// CaptureParams is a fully resolved capture policy.
+type CaptureParams struct {
+	Body      bool
+	MaxBytes  int64
+	Streaming bool
+}
+
+// DefaultHistory returns the built-in history defaults with the top-level
+// section applied.
+func (c *Config) DefaultHistory() HistoryParams {
+	p := HistoryParams{Size: 500, Errors: 200, MaxBytes: 32 << 20}
+	if h := c.History; h != nil {
+		if h.Size != nil {
+			p.Size = *h.Size
+		}
+		if h.Errors != nil {
+			p.Errors = *h.Errors
+		}
+		if h.MaxBytes != nil {
+			p.MaxBytes = int64(*h.MaxBytes)
+		}
+	}
+	return p
+}
+
+// DefaultDashboard returns the built-in dashboard defaults with the
+// top-level section applied.
+func (c *Config) DefaultDashboard() DashboardParams {
+	p := DashboardParams{Enabled: true, ConfigEdit: true, Watch: 10 * time.Second}
+	if d := c.Dashboard; d != nil {
+		if d.Enabled != nil {
+			p.Enabled = *d.Enabled
+		}
+		if d.ConfigEdit != nil {
+			p.ConfigEdit = *d.ConfigEdit
+		}
+		if d.Watch != nil {
+			p.Watch = time.Duration(*d.Watch)
+		}
+	}
+	return p
+}
+
+// defaultCapture is the built-in, always-off capture policy.
+func defaultCapture() CaptureParams {
+	return CaptureParams{Body: false, MaxBytes: 64 << 10, Streaming: false}
+}
+
+func (c *Capture) apply(p *CaptureParams) {
+	if c == nil {
+		return
+	}
+	if c.Body != nil {
+		p.Body = *c.Body
+	}
+	if c.MaxBytes != nil {
+		p.MaxBytes = int64(*c.MaxBytes)
+	}
+	if c.Streaming != nil {
+		p.Streaming = *c.Streaming
+	}
+}
+
+// CaptureFor resolves the effective capture policy for a provider or
+// sidecar route: built-in defaults (off) ← provider/sidecar capture.
+func (c *Config) CaptureFor(name string) CaptureParams {
+	p := defaultCapture()
+	if prov, ok := c.Providers[name]; ok {
+		prov.Capture.apply(&p)
+		return p
+	}
+	if sc, ok := c.Sidecar[name]; ok {
+		sc.Capture.apply(&p)
+		return p
+	}
+	return p
 }
 
 type Auth struct {
@@ -53,6 +176,7 @@ type Provider struct {
 	KeyIn    KeyIn     `yaml:"key_in"`
 	Keys     []string  `yaml:"keys"`
 	Rotation *Rotation `yaml:"rotation"`
+	Capture  *Capture  `yaml:"capture"`
 }
 
 // KeyIn describes where the provider expects its API key: exactly one of
@@ -71,8 +195,9 @@ type Sidecar struct {
 	HealthInterval *Duration `yaml:"health_interval"`
 	// Optional static key injected into sidecar requests (for CLIProxyAPI
 	// instances that require their own api-key). No rotation.
-	KeyIn *KeyIn `yaml:"key_in"`
-	Key   string `yaml:"key"`
+	KeyIn   *KeyIn   `yaml:"key_in"`
+	Key     string   `yaml:"key"`
+	Capture *Capture `yaml:"capture"`
 }
 
 type Duration time.Duration
@@ -125,40 +250,127 @@ func (s *Size) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// Load reads and parses the config file at path.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return Parse(raw, path)
+}
+
+// Parse expands ${VAR} references, strictly decodes, and validates raw YAML
+// config bytes. source is used only in error messages — a file path at
+// startup, or e.g. "request body" when parsing config submitted through the
+// dashboard's editor.
+func Parse(raw []byte, source string) (*Config, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	if doc.Kind == 0 {
-		return nil, fmt.Errorf("%s: config is empty", path)
+		return nil, fmt.Errorf("%s: config is empty", source)
 	}
 	var missing []string
 	expandEnvNode(&doc, &missing)
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("%s: undefined environment variables: %s",
-			path, strings.Join(missing, ", "))
+			source, strings.Join(missing, ", "))
 	}
 	// Re-emit and strictly re-parse: the YAML emitter quotes substituted
 	// values, so secrets stay opaque strings whatever characters they hold.
 	data, err := yaml.Marshal(&doc)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	return &cfg, nil
+}
+
+// Version returns a short content-hash of raw config bytes, used as an
+// optimistic-concurrency token by the dashboard's config editor.
+func Version(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])[:16]
+}
+
+// Save writes data to path atomically: it's written to a temp file in the
+// same directory (so the following rename stays on one filesystem, which
+// matters when path is a bind-mounted volume) and then renamed over path.
+// When backup is true, path's previous content — if any — is preserved
+// first as path+".bak-"+<RFC3339 timestamp>, and older backups beyond keep
+// are pruned.
+func Save(path string, data []byte, backup bool, keep int) error {
+	dir := filepath.Dir(path)
+	if backup {
+		if err := saveBackup(path, keep); err != nil {
+			return err
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".heka-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func saveBackup(path string, keep int) error {
+	cur, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // nothing to back up yet
+	}
+	if err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	bakPath := path + ".bak-" + stamp
+	if err := os.WriteFile(bakPath, cur, 0o600); err != nil {
+		return err
+	}
+	return pruneBackups(path, keep)
+}
+
+func pruneBackups(path string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	matches, err := filepath.Glob(path + ".bak-*")
+	if err != nil {
+		return err
+	}
+	if len(matches) <= keep {
+		return nil
+	}
+	sort.Strings(matches) // timestamp suffix sorts chronologically
+	for _, m := range matches[:len(matches)-keep] {
+		os.Remove(m)
+	}
+	return nil
 }
 
 // envRe matches ${VAR} plus the $${VAR} escape for a literal ${VAR}.
@@ -289,6 +501,42 @@ func (k *KeyIn) validate(where string) error {
 	return nil
 }
 
+func (c *Capture) validate(where string) error {
+	if c == nil {
+		return nil
+	}
+	if c.MaxBytes != nil && int64(*c.MaxBytes) > 8<<20 {
+		return fmt.Errorf("%s: max_bytes must be <= 8MiB", where)
+	}
+	return nil
+}
+
+func (h *History) validate(where string) error {
+	if h == nil {
+		return nil
+	}
+	if h.Size != nil && (*h.Size < 1 || *h.Size > 100000) {
+		return fmt.Errorf("%s: size must be in 1..100000", where)
+	}
+	if h.Errors != nil && (*h.Errors < 1 || *h.Errors > 100000) {
+		return fmt.Errorf("%s: errors must be in 1..100000", where)
+	}
+	if h.MaxBytes != nil && int64(*h.MaxBytes) < 1<<20 {
+		return fmt.Errorf("%s: max_bytes must be >= 1MiB", where)
+	}
+	return nil
+}
+
+func (d *Dashboard) validate(where string) error {
+	if d == nil {
+		return nil
+	}
+	if d.Watch != nil && time.Duration(*d.Watch) < time.Second {
+		return fmt.Errorf("%s: watch must be >= 1s", where)
+	}
+	return nil
+}
+
 var routeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 func (c *Config) validate() error {
@@ -306,6 +554,12 @@ func (c *Config) validate() error {
 	if err := c.Rotation.validate("rotation"); err != nil {
 		return err
 	}
+	if err := c.History.validate("history"); err != nil {
+		return err
+	}
+	if err := c.Dashboard.validate("dashboard"); err != nil {
+		return err
+	}
 	if len(c.Providers) == 0 && len(c.Sidecar) == 0 {
 		return errors.New("no providers or sidecars configured")
 	}
@@ -315,7 +569,7 @@ func (c *Config) validate() error {
 		if !routeRe.MatchString(route) {
 			return fmt.Errorf("%s: route %q must match %s", owner, route, routeRe)
 		}
-		if route == "healthz" || route == "status" {
+		if route == "healthz" || route == "status" || route == "dashboard" {
 			return fmt.Errorf("%s: route %q is reserved", owner, route)
 		}
 		if prev, dup := routes[route]; dup {
@@ -348,6 +602,9 @@ func (c *Config) validate() error {
 			}
 		}
 		if err := p.Rotation.validate(where + ": rotation"); err != nil {
+			return err
+		}
+		if err := p.Capture.validate(where + ": capture"); err != nil {
 			return err
 		}
 	}
@@ -385,6 +642,9 @@ func (c *Config) validate() error {
 			if err := s.KeyIn.validate(where + ": key_in"); err != nil {
 				return err
 			}
+		}
+		if err := s.Capture.validate(where + ": capture"); err != nil {
+			return err
 		}
 	}
 	return nil

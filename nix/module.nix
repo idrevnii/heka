@@ -57,6 +57,19 @@ in
       description = "Pre-rendered config file; overrides {option}`settings`.";
     };
 
+    mutableConfig = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        When enabled, `settings`/`configFile` seed a writable copy under
+        {file}`StateDirectory` (`/var/lib/heka/heka.yaml`) on first start
+        instead of running directly from the read-only nix store — required
+        for the dashboard's config editor and hot reload to be able to save
+        changes. `services.heka.settings` then only matters for the very
+        first boot; afterwards, edit the live file or use the dashboard.
+      '';
+    };
+
     environmentFiles = lib.mkOption {
       type = lib.types.listOf lib.types.path;
       default = [ ];
@@ -99,9 +112,15 @@ in
 
       serviceConfig = {
         ExecStart = lib.escapeShellArgs (
-          [ (lib.getExe cfg.package) "-config" configFile ]
+          [ (lib.getExe cfg.package) "-config" ]
+          ++ (
+            if cfg.mutableConfig
+            then [ "/var/lib/heka/heka.yaml" "-seed" configFile ]
+            else [ configFile ]
+          )
           ++ lib.optional cfg.logJson "-log-json"
         );
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         EnvironmentFile = cfg.environmentFiles;
         Restart = "always";
         RestartSec = 2;

@@ -16,7 +16,13 @@ services:
       COOLIFY_APP_NAME: heka
     ports:
       - "${HEKA_BIND_ADDRESS:-10.40.0.10}:${HEKA_PORT:-8787}:8787"
+    volumes:
+      - type: bind
+        source: /data/apps/heka/config
+        target: /etc/heka
     depends_on:
+      heka-init:
+        condition: service_completed_successfully
       cliproxyapi:
         condition: service_healthy
     healthcheck:
@@ -33,6 +39,20 @@ services:
     cap_drop:
       - ALL
     logging: *default-logging
+
+  # One-shot: makes the config volume writable by heka's non-root uid.
+  # read_only: true on the heka service doesn't affect bind mounts, but a
+  # freshly created host directory would otherwise be root-owned and heka
+  # (cap_drop: ALL, uid 65532) could neither seed nor save its config.
+  heka-init:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-ec", "mkdir -p /etc/heka && chown -R 65532:65532 /etc/heka && chmod 700 /etc/heka"]
+    volumes:
+      - type: bind
+        source: /data/apps/heka/config
+        target: /etc/heka
+    restart: "no"
 
   cliproxyapi:
     image: eceasy/cli-proxy-api:v7.2.100

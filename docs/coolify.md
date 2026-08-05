@@ -22,13 +22,36 @@ The Heka token is the value of `SERVICE_PASSWORD_64_HEKA` shown in Coolify.
 Clients use it as their API key. The CLIProxyAPI key is internal and should
 not be given to clients.
 
-Configuration without secrets lives in:
+`deploy/heka.yaml` in the repo is only a **first-boot seed**. The live,
+authoritative config is `/data/apps/heka/config/heka.yaml` on the host,
+bind-mounted into the `heka` container at `/etc/heka/heka.yaml` (a one-shot
+`heka-init` service in the compose file `chown`s that directory to heka's
+non-root uid before the gateway starts). On a fresh volume it's seeded from
+`deploy/heka.yaml`; after that, editing the file in the repo has no further
+effect on an already-deployed instance.
 
-- `deploy/heka.yaml` for Heka routes and rotation policy;
-- `docker-compose.yml` under `configs.cliproxy-config` for CLIProxyAPI.
+Ongoing changes — adding a provider, rotating keys, tweaking rotation
+policy — go through either of:
 
-Commit configuration changes and redeploy the application. Heka reads its
-configuration at startup and currently requires a restart after changes.
+- the dashboard's config editor at `http://10.40.0.10:8787/dashboard`
+  (bearer token via the usual header, or open the link with `?token=...`
+  appended once — the page moves it out of the URL bar immediately); or
+- editing `/data/apps/heka/config/heka.yaml` directly on the host and
+  waiting for Heka's file watcher to pick it up (within `dashboard.watch`,
+  10s by default), or sending it `SIGHUP`.
+
+Both paths hot-reload: provider key pools and sidecar processes whose
+config didn't change keep running untouched (cooldown/disabled state and
+success/failure counters survive), and in-flight requests are unaffected.
+Only a change to `listen` needs an actual restart — the dashboard's save
+response flags this via `restart_required`. **The live config file may
+contain plaintext provider API keys** — the `${VAR}` indirection used in
+`deploy/heka.yaml` is no longer required once the file is live and edited
+via the dashboard, though it still works. Treat that file with the same
+sensitivity as the Coolify secrets it replaces.
+
+CLIProxyAPI's own (non-secret) config still lives in `docker-compose.yml`
+under `configs.cliproxy-config`; commit and redeploy for changes there.
 
 ## OAuth login
 
@@ -114,16 +137,29 @@ Heka exposes:
 
 - unauthenticated liveness at `GET /healthz`;
 - authenticated provider state at `GET /status`;
-- authenticated state reset at `POST /status/reset`.
+- authenticated state reset at `POST /status/reset`;
+- an authenticated dashboard at `GET /dashboard` — recent requests, errors,
+  provider/sidecar state, and the config editor described above.
 
-Request and response bodies are not logged by Heka. CLIProxyAPI debug and
-detailed request logging are disabled.
+Request and response bodies are not logged by Heka, and are never written to
+disk. They may be held **in memory only**, per route, when that provider or
+sidecar's `capture.body` is explicitly enabled in config (default off) —
+bounded by `capture.max_bytes` per request and by `history.max_bytes`
+overall, visible only through the dashboard, and lost on restart along with
+the rest of the in-memory request history. CLIProxyAPI debug and detailed
+request logging are disabled.
 
 ## Persistence and backup
 
-The only state that must survive redeployments is
-`/data/apps/heka/cliproxy-auth`. Cuprum includes the containing `apps-data`
-volume in its restic backup.
+Two paths must survive redeployments:
+
+- `/data/apps/heka/cliproxy-auth` (OAuth tokens);
+- `/data/apps/heka/config` (the live Heka config — now holds plaintext
+  provider keys when the dashboard editor is used, same sensitivity class
+  as the OAuth token store).
+
+Cuprum includes the containing `apps-data` volume, and both of the above
+live under it, in its restic backup.
 
 Traffic is plain HTTP on the trusted private network. Do not expose port
 `8787` through NAT or a public interface. Add TLS or a private VPN before

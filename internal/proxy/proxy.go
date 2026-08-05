@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/idrevnii/heka/internal/config"
+	"github.com/idrevnii/heka/internal/history"
 	"github.com/idrevnii/heka/internal/keypool"
 )
 
@@ -35,11 +36,14 @@ type Params struct {
 // stripped.
 type Handler struct {
 	Name      string
+	Kind      string // "provider" | "sidecar", recorded into history
 	Target    *url.URL
 	KeyIn     config.KeyIn
 	Pool      *keypool.Pool
 	StaticKey string
 	Params    Params
+	Capture   config.CaptureParams
+	History   *history.Store // nil-safe; no history is recorded when nil
 	Transport http.RoundTripper
 	Log       *slog.Logger
 }
@@ -68,20 +72,25 @@ func (v verdict) String() string {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Buffering exists only to replay the body on retry; without a pool
-	// there is no retry, so the body streams straight through.
+	// Buffering exists to replay the body on retry (needs a pool) and/or to
+	// capture it for the dashboard; without either, the body streams
+	// straight through.
 	var (
 		buf        []byte
 		replayable bool
 	)
-	if h.Pool != nil {
+	if h.Pool != nil || h.Capture.Body {
 		var err error
 		buf, replayable, err = h.readBody(r)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+			h.finish(r, start, finishInfo{
+				status: http.StatusBadRequest, keyIdx: -1, verdict: "bad_request", err: err,
+			})
 			return
 		}
 	}
+	reqSink := captureRequest(buf, replayable, h.Capture)
 
 	keyIdx, secret := -1, h.StaticKey
 	if h.Pool != nil {
@@ -90,7 +99,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			WriteError(w, http.StatusServiceUnavailable,
 				fmt.Sprintf("heka: no usable keys for provider %q (all disabled)", h.Name))
-			h.logRequest(r, start, http.StatusServiceUnavailable, 0, -1)
+			h.finish(r, start, finishInfo{
+				status: http.StatusServiceUnavailable, keyIdx: -1, verdict: "no_keys", reqBody: reqSink,
+			})
 			return
 		}
 	}
@@ -100,22 +111,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp     *http.Response
 		lastErr  error
 		attempts int
+		lastV    verdict
 	)
 	for {
 		attempts++
 		out, err := h.outbound(r, secret, buf, replayable)
 		if err != nil {
 			WriteError(w, http.StatusInternalServerError, "heka: "+err.Error())
+			h.finish(r, start, finishInfo{
+				status: http.StatusInternalServerError, attempts: attempts, keyIdx: keyIdx,
+				verdict: "internal_error", err: err, reqBody: reqSink,
+			})
 			return
 		}
 		resp, lastErr = h.Transport.RoundTrip(out)
 		if lastErr != nil && r.Context().Err() != nil {
 			// The client went away; the key is fine and there is no one
 			// to answer — no failure bookkeeping, no rotation.
-			h.logRequest(r, start, 499, attempts, keyIdx)
+			h.finish(r, start, finishInfo{
+				status: 499, attempts: attempts, keyIdx: keyIdx, verdict: "client_gone", reqBody: reqSink,
+			})
 			return
 		}
 		v := classify(resp, lastErr, h.Params)
+		lastV = v
 		h.report(v, keyIdx, resp)
 		if v == vOK || h.Pool == nil || !replayable || attempts > h.Params.MaxRetries {
 			break
@@ -139,12 +158,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if lastErr != nil {
 		WriteError(w, http.StatusBadGateway, "heka: upstream error: "+lastErr.Error())
-		h.logRequest(r, start, http.StatusBadGateway, attempts, keyIdx)
+		h.finish(r, start, finishInfo{
+			status: http.StatusBadGateway, attempts: attempts, keyIdx: keyIdx,
+			verdict: lastV.String(), err: lastErr, reqBody: reqSink,
+		})
 		return
 	}
 	defer resp.Body.Close()
-	copyResponse(w, resp)
-	h.logRequest(r, start, resp.StatusCode, attempts, keyIdx)
+
+	streaming := isStreaming(resp)
+	var respSink *sink
+	if h.Capture.Body && (!streaming || h.Capture.Streaming) {
+		respSink = newSink(h.Capture.MaxBytes)
+	}
+	copyResponse(w, resp, respSink)
+	h.finish(r, start, finishInfo{
+		status: resp.StatusCode, attempts: attempts, keyIdx: keyIdx, verdict: lastV.String(),
+		reqBody: reqSink, respBody: respSink, streaming: streaming,
+		reqCT: r.Header.Get("Content-Type"), respCT: resp.Header.Get("Content-Type"),
+		respEnc: resp.Header.Get("Content-Encoding"),
+	})
 }
 
 // readBody buffers up to MaxBodyBuffer bytes. When the body fits, it is
@@ -293,14 +326,23 @@ func retryAfter(resp *http.Response) (d time.Duration, ok bool) {
 	return 0, false
 }
 
-func copyResponse(w http.ResponseWriter, resp *http.Response) {
+// isStreaming reports whether a response should be treated as a live stream
+// (SSE, or a body of unknown length) rather than a fixed-size payload.
+func isStreaming(resp *http.Response) bool {
+	return resp.ContentLength < 0 ||
+		strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
+// copyResponse streams resp's body to w. When sink is non-nil, every chunk
+// written to the client is also (best-effort, size-capped) mirrored into it
+// for the dashboard's request history.
+func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink) {
 	stripHopByHop(resp.Header)
 	maps.Copy(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	// Flush per chunk only when the response actually streams (SSE or
 	// unknown length); fixed-size bodies keep the writer's coalescing.
-	streaming := resp.ContentLength < 0 ||
-		strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+	streaming := isStreaming(resp)
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 32<<10)
 	for {
@@ -309,6 +351,7 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
+			sink.Write(buf[:n])
 			if streaming {
 				rc.Flush()
 			}
@@ -347,19 +390,128 @@ func statusOf(resp *http.Response, err error) any {
 	return resp.StatusCode
 }
 
-func (h *Handler) logRequest(r *http.Request, start time.Time, status, attempts, keyIdx int) {
+// sink is a size-capped in-memory body capture buffer. A nil *sink silently
+// discards everything written to it, so callers can pass nil unconditionally
+// when capture is off.
+type sink struct {
+	buf       []byte
+	max       int64
+	truncated bool
+}
+
+func newSink(max int64) *sink {
+	if max <= 0 {
+		return nil
+	}
+	return &sink{max: max}
+}
+
+func (s *sink) Write(p []byte) {
+	if s == nil || len(p) == 0 {
+		return
+	}
+	room := s.max - int64(len(s.buf))
+	if room <= 0 {
+		s.truncated = true
+		return
+	}
+	if int64(len(p)) > room {
+		s.buf = append(s.buf, p[:room]...)
+		s.truncated = true
+		return
+	}
+	s.buf = append(s.buf, p...)
+}
+
+// captureRequest returns a sink pre-filled from the already-buffered request
+// body when capture is enabled — no extra buffering pass. buf may be a
+// truncated prefix (see readBody/outbound) when the body exceeded
+// MaxBodyBuffer; that's reflected as truncated too.
+func captureRequest(buf []byte, replayable bool, capture config.CaptureParams) *sink {
+	if !capture.Body || len(buf) == 0 {
+		return nil
+	}
+	s := newSink(capture.MaxBytes)
+	if s == nil {
+		return nil
+	}
+	s.Write(buf)
+	if !replayable {
+		s.truncated = true
+	}
+	return s
+}
+
+// finishInfo carries everything finish needs to both log (matching the
+// previous logRequest's shape exactly) and, when a history.Store is
+// configured, record the request.
+type finishInfo struct {
+	status, attempts, keyIdx int
+	verdict                  string
+	err                      error
+	reqCT, respCT, respEnc   string
+	streaming                bool
+	reqBody, respBody        *sink
+}
+
+// finish is the single exit point for every ServeHTTP return path: it logs
+// one line (as logRequest always did) and, if capture produced anything (or
+// even if it didn't — CaptureSkip records why), appends a history.Record.
+func (h *Handler) finish(r *http.Request, start time.Time, fi finishInfo) {
+	duration := time.Since(start)
 	attrs := []any{
 		"provider", h.Name,
 		"method", r.Method,
 		"path", r.URL.Path,
-		"status", status,
-		"attempts", attempts,
-		"duration", time.Since(start).Round(time.Millisecond).String(),
+		"status", fi.status,
+		"attempts", fi.attempts,
+		"duration", duration.Round(time.Millisecond).String(),
 	}
-	if h.Pool != nil && keyIdx >= 0 {
-		attrs = append(attrs, "key", h.Pool.MaskedKey(keyIdx))
+	if h.Pool != nil && fi.keyIdx >= 0 {
+		attrs = append(attrs, "key", h.Pool.MaskedKey(fi.keyIdx))
 	}
 	h.Log.Info("request", attrs...)
+
+	if h.History == nil {
+		return
+	}
+	rec := history.Record{
+		Time:      start,
+		Route:     h.Name,
+		Kind:      h.Kind,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Query:     r.URL.RawQuery,
+		Upstream:  h.Target.String() + r.URL.Path,
+		Status:    fi.status,
+		Attempts:  fi.attempts,
+		Duration:  duration.Milliseconds(),
+		Verdict:   fi.verdict,
+		Streaming: fi.streaming,
+		ReqCT:     fi.reqCT,
+		RespCT:    fi.respCT,
+		RespEnc:   fi.respEnc,
+	}
+	if h.Pool != nil && fi.keyIdx >= 0 {
+		rec.Key = h.Pool.MaskedKey(fi.keyIdx)
+	}
+	if fi.err != nil {
+		rec.Err = fi.err.Error()
+	}
+	if fi.reqBody != nil {
+		rec.ReqBody = fi.reqBody.buf
+		rec.ReqTrunc = fi.reqBody.truncated
+	}
+	switch {
+	case fi.respBody != nil:
+		rec.RespBody = fi.respBody.buf
+		rec.RespTrunc = fi.respBody.truncated
+	case !h.Capture.Body:
+		rec.CaptureSkip = "disabled"
+	case fi.streaming:
+		rec.CaptureSkip = "streaming"
+	}
+	h.History.Add(rec)
 }
 
 // WriteJSON writes a JSON response body with the given status code.

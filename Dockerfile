@@ -20,14 +20,20 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -S -g 65532 heka \
-    && adduser -S -D -H -u 65532 -G heka heka
+    && adduser -S -D -H -u 65532 -G heka heka \
+    && mkdir -p /etc/heka \
+    && chown 65532:65532 /etc/heka
 
 COPY --from=build /out/heka /usr/local/bin/heka
-COPY deploy/heka.yaml /etc/heka/heka.yaml
+# Only a first-boot seed: the live config is /etc/heka/heka.yaml, expected
+# to be a persistent volume so it survives image rebuilds/redeploys. If it's
+# missing at startup it's copied from here (see -seed below); once it
+# exists, this seed is never consulted again.
+COPY deploy/heka.yaml /usr/share/heka/heka.default.yaml
 
 USER 65532:65532
 
 EXPOSE 8787
 
 ENTRYPOINT ["/usr/local/bin/heka"]
-CMD ["-config", "/etc/heka/heka.yaml", "-log-json"]
+CMD ["-config", "/etc/heka/heka.yaml", "-seed", "/usr/share/heka/heka.default.yaml", "-log-json"]

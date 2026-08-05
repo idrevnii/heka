@@ -1,3 +1,10 @@
+# First-boot seed only. The live config is /etc/heka/heka.yaml on a
+# persistent volume; this file is copied there once, if and only if that
+# path doesn't exist yet (see cmd/heka's -seed flag). After that, edit the
+# live file directly or through the dashboard's config editor
+# (/dashboard) — changes to this file in the repo have no effect on an
+# already-deployed instance.
+
 listen: "0.0.0.0:8787"
 
 auth:
@@ -9,6 +16,16 @@ rotation:
   cooldown_max: 1h
   max_retries: 3
   max_body_buffer: 10MiB
+
+# history:
+#   size: 500        # requests kept in the in-memory ring buffer
+#   errors: 200
+#   max_bytes: 32MiB  # captured-body memory budget across all kept requests
+#
+# dashboard:
+#   enabled: true
+#   config_edit: true
+#   watch: 10s        # how often to notice out-of-band edits to this file
 
 sidecar:
   cliproxy:

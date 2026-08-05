@@ -1,5 +1,10 @@
 # local config may reference real key material paths / tokens
 /heka.yaml
+*.local.yaml
+deploy/heka.local.yaml
+# the deployed config volume may be bind-mounted here for local testing
+/etc-heka/
+*.bak-*
 
 # build output
 /heka

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heka</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>heka</h1>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="requests">Requests</button>
+    <button data-tab="config">Config</button>
+  </nav>
+  <div id="auth-status"></div>
+</header>
+
+<main>
+
+<section id="tab-overview" class="tab active">
+  <div id="stat-tiles" class="tiles"></div>
+  <h2>Providers &amp; sidecars</h2>
+  <div id="proxies"></div>
+  <h2>Recent errors</h2>
+  <div id="errors"></div>
+</section>
+
+<section id="tab-requests" class="tab">
+  <div class="toolbar">
+    <label><input type="checkbox" id="only-errors"> errors only</label>
+    <label><input type="checkbox" id="auto-refresh" checked> auto-refresh</label>
+  </div>
+  <div class="requests-layout">
+    <table id="requests-table">
+      <thead>
+        <tr><th>time</th><th>route</th><th>method</th><th>path</th><th>status</th><th>attempts</th><th>ms</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <pre id="request-detail" class="detail">select a request</pre>
+  </div>
+</section>
+
+<section id="tab-config" class="tab">
+  <div class="toolbar">
+    <span id="config-path"></span>
+    <button id="config-validate">Validate</button>
+    <button id="config-save">Save &amp; apply</button>
+    <span id="config-status"></span>
+  </div>
+  <textarea id="config-editor" spellcheck="false"></textarea>
+</section>
+
+</main>
+
+<div id="token-prompt" class="modal hidden">
+  <div class="modal-box">
+    <p>Gateway token required.</p>
+    <input id="token-input" type="password" placeholder="gateway token">
+    <button id="token-submit">Continue</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
