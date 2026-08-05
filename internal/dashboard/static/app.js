@@ -292,6 +292,13 @@ document.getElementById("only-errors").addEventListener("change", loadRequests);
 // needed to load the dashboard.
 let configVersion = "";
 let editor = null;
+// baseline is the last content we know the server has (freshly loaded or
+// just saved); dirty means the editor has diverged from it. Both the
+// polling refresh and tab-switch reloads must never overwrite an in-progress
+// edit — that was the bug: the 3s poll called loadConfig() unconditionally
+// even while the config tab was open, discarding whatever was being typed.
+let configBaseline = "";
+let configDirty = false;
 
 function ensureEditor(initialText, readOnly) {
   if (editor) return editor;
@@ -300,13 +307,25 @@ function ensureEditor(initialText, readOnly) {
     initialText,
     {
       readOnly: readOnly,
+      onChange: (text) => {
+        const wasDirty = configDirty;
+        configDirty = text !== configBaseline;
+        if (configDirty && !wasDirty) setConfigStatus("unsaved changes");
+        if (!configDirty) setConfigStatus("");
+      },
       onSave: () => document.getElementById("config-save").click(),
     }
   );
   return editor;
 }
 
-async function loadConfig() {
+// force=true is used right after a successful save, where we want to
+// re-baseline even though the editor technically still holds "dirty"
+// (just-saved) content.
+async function loadConfig(force) {
+  if (editor && configDirty && !force) {
+    return; // never clobber an in-progress edit
+  }
   let cfg;
   try {
     cfg = await apiJSON("/dashboard/api/config");
@@ -321,6 +340,8 @@ async function loadConfig() {
     editor.setReadOnly(!cfg.editable);
   }
   configVersion = cfg.version;
+  configBaseline = cfg.content;
+  configDirty = false;
   setConfigStatus("");
 }
 
@@ -357,6 +378,8 @@ document.getElementById("config-save").addEventListener("click", async () => {
       body: JSON.stringify({ content, version: configVersion }),
     });
     configVersion = res.version;
+    configBaseline = content;
+    configDirty = false;
     let msg = "applied";
     if (res.restart_required && res.restart_required.length) {
       msg += " (restart required for: " + res.restart_required.join(", ") + ")";
@@ -375,8 +398,19 @@ document.getElementById("config-save").addEventListener("click", async () => {
 // --- polling ------------------------------------------------------------------
 setInterval(() => {
   if (!document.getElementById("auto-refresh").checked) return;
+  // The config tab is an editing session, not a live view — polling it
+  // would either discard in-progress edits or (with the dirty-check above)
+  // just be a no-op, so skip it outright.
+  if (activeTabName() === "config") return;
   refreshActiveTab();
 }, 3000);
+
+window.addEventListener("beforeunload", (ev) => {
+  if (configDirty) {
+    ev.preventDefault();
+    ev.returnValue = "";
+  }
+});
 
 if (!getToken()) {
   showTokenPrompt();
