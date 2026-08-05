@@ -285,7 +285,26 @@ function formatBody(b) {
 document.getElementById("only-errors").addEventListener("change", loadRequests);
 
 // --- config ------------------------------------------------------------------
+// Editing uses the vendored CodeMirror bundle (codemirror.bundle.js,
+// window.HekaEditor) for YAML syntax highlighting, line numbers and
+// error-line jumping — see internal/dashboard/editor-src/README.md for how
+// it's built. It's a local, self-contained asset: no CDN, no network access
+// needed to load the dashboard.
 let configVersion = "";
+let editor = null;
+
+function ensureEditor(initialText, readOnly) {
+  if (editor) return editor;
+  editor = window.HekaEditor.create(
+    document.getElementById("config-editor-container"),
+    initialText,
+    {
+      readOnly: readOnly,
+      onSave: () => document.getElementById("config-save").click(),
+    }
+  );
+  return editor;
+}
 
 async function loadConfig() {
   let cfg;
@@ -295,8 +314,12 @@ async function loadConfig() {
     return;
   }
   document.getElementById("config-path").textContent = cfg.path;
-  document.getElementById("config-editor").value = cfg.content;
-  document.getElementById("config-editor").disabled = !cfg.editable;
+  if (!editor) {
+    ensureEditor(cfg.content, !cfg.editable);
+  } else {
+    editor.setValue(cfg.content);
+    editor.setReadOnly(!cfg.editable);
+  }
   configVersion = cfg.version;
   setConfigStatus("");
 }
@@ -307,18 +330,26 @@ function setConfigStatus(msg, isError) {
   s.style.color = isError ? "var(--err)" : "var(--muted)";
 }
 
+// Parses "... line 12: ..." out of a config.Parse error (yaml.v3's error
+// messages include a line number) and jumps the editor there.
+function jumpToErrorLine(message) {
+  const m = /line (\d+)/i.exec(message || "");
+  if (m && editor) editor.gotoLine(parseInt(m[1], 10));
+}
+
 document.getElementById("config-validate").addEventListener("click", async () => {
-  const content = document.getElementById("config-editor").value;
+  const content = editor.getValue();
   try {
     await apiJSON("/dashboard/api/config/validate", { method: "POST", body: JSON.stringify({ content }) });
     setConfigStatus("valid");
   } catch (e) {
     setConfigStatus(e.message, true);
+    jumpToErrorLine(e.message);
   }
 });
 
 document.getElementById("config-save").addEventListener("click", async () => {
-  const content = document.getElementById("config-editor").value;
+  const content = editor.getValue();
   setConfigStatus("saving…");
   try {
     const res = await apiJSON("/dashboard/api/config", {
@@ -336,22 +367,8 @@ document.getElementById("config-save").addEventListener("click", async () => {
       setConfigStatus("conflict: config changed since you loaded it — reload before saving", true);
     } else {
       setConfigStatus(e.message, true);
+      jumpToErrorLine(e.message);
     }
-  }
-});
-
-document.getElementById("config-editor").addEventListener("keydown", (ev) => {
-  if (ev.key === "Tab") {
-    ev.preventDefault();
-    const el = ev.target;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    el.value = el.value.slice(0, start) + "  " + el.value.slice(end);
-    el.selectionStart = el.selectionEnd = start + 2;
-  }
-  if ((ev.metaKey || ev.ctrlKey) && ev.key === "s") {
-    ev.preventDefault();
-    document.getElementById("config-save").click();
   }
 });
 

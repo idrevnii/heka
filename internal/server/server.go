@@ -120,8 +120,14 @@ func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// style-src needs 'unsafe-inline': the vendored CodeMirror editor injects
+	// its highlighting/theme rules as inline <style> elements at runtime (a
+	// StyleModule, not a stylesheet load) — standard for any JS-driven
+	// editor. script-src stays 'self'-only; that's the directive that
+	// actually matters against injection on a page holding the gateway
+	// token.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:")
+		"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:")
 
 	if strings.HasPrefix(r.URL.Path, "/dashboard/api/") && !s.authorized(st, r) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
