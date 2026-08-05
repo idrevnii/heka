@@ -231,7 +231,7 @@ async function loadRequests() {
       el("td", { class: statusClass(r.status) }, [String(r.status)]),
       el("td", {}, [String(r.attempts)]),
       el("td", {}, [String(r.duration_ms)]),
-      el("td", { class: "cache" }, [fmtTokens(r)]),
+      el("td", { class: "cache", title: tokensTitle(r) }, [fmtTokens(r)]),
     ]);
     tr.addEventListener("click", () => showRequestDetail(r.id));
     tbody.appendChild(tr);
@@ -252,10 +252,18 @@ function cacheTitle(k) {
     " · output " + fmtNum(k.output_tokens);
 }
 
+// Kept short: this column shares a row with the path, and the full
+// breakdown is one hover away.
 function fmtTokens(r) {
   if (!r.input_tokens) return "";
   const pct = Math.round(((r.cache_read_tokens || 0) / r.input_tokens) * 100);
-  return fmtNum(r.input_tokens) + " in / " + pct + "% cached";
+  return fmtNum(r.input_tokens) + " · " + pct + "%";
+}
+
+function tokensTitle(r) {
+  if (!r.input_tokens) return "";
+  return "input " + r.input_tokens + " (cache read " + (r.cache_read_tokens || 0) +
+    ", cache write " + (r.cache_write_tokens || 0) + ") · output " + (r.output_tokens || 0);
 }
 
 function fmtNum(n) {

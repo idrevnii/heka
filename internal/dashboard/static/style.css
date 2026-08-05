@@ -160,9 +160,25 @@ td.cache { color: var(--muted); }
 
 .requests-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+/* The request table has more columns than its grid cell can always hold, and
+   its cells don't wrap. Without a scroll box of its own it would spill out
+   from under the detail pane instead of being clipped by it. */
+.requests-list {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* Below the point where main can still be its full 1200px, the table no
+   longer fits beside the detail pane: stack them instead of squeezing the
+   list into a scroll box. */
+@media (max-width: 1250px) {
+  .requests-layout { grid-template-columns: minmax(0, 1fr); }
+  .detail { max-height: 40vh; }
 }
 
 .detail {
