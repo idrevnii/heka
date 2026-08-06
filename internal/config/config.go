@@ -156,6 +156,7 @@ type Rotation struct {
 	CooldownBase  *Duration `yaml:"cooldown_base"`
 	CooldownMax   *Duration `yaml:"cooldown_max"`
 	MaxRetries    *int      `yaml:"max_retries"`
+	MaxDisables   *int      `yaml:"max_disables"`
 	MaxBodyBuffer *Size     `yaml:"max_body_buffer"`
 	CooldownOn    []int     `yaml:"cooldown_on"`
 	DisableOn     []int     `yaml:"disable_on"`
@@ -167,6 +168,7 @@ type RotationParams struct {
 	CooldownBase  time.Duration
 	CooldownMax   time.Duration
 	MaxRetries    int
+	MaxDisables   int
 	MaxBodyBuffer int64
 	CooldownOn    []int
 	DisableOn     []int
@@ -439,6 +441,7 @@ func (c *Config) DefaultRotation() RotationParams {
 		CooldownBase:  60 * time.Second,
 		CooldownMax:   time.Hour,
 		MaxRetries:    3,
+		MaxDisables:   1,
 		MaxBodyBuffer: 10 << 20,
 		CooldownOn:    []int{429},
 		DisableOn:     []int{401, 402, 403},
@@ -471,6 +474,9 @@ func (r *Rotation) apply(p *RotationParams) {
 	if r.MaxRetries != nil {
 		p.MaxRetries = *r.MaxRetries
 	}
+	if r.MaxDisables != nil {
+		p.MaxDisables = *r.MaxDisables
+	}
 	if r.MaxBodyBuffer != nil {
 		p.MaxBodyBuffer = int64(*r.MaxBodyBuffer)
 	}
@@ -497,6 +503,9 @@ func (r *Rotation) validate(where string) error {
 	}
 	if r.MaxRetries != nil && *r.MaxRetries < 0 {
 		return fmt.Errorf("%s: max_retries must be >= 0", where)
+	}
+	if r.MaxDisables != nil && *r.MaxDisables < 0 {
+		return fmt.Errorf("%s: max_disables must be >= 0", where)
 	}
 	for _, list := range [][]int{r.CooldownOn, r.DisableOn} {
 		for _, code := range list {

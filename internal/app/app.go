@@ -400,6 +400,7 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 				Pool:   pool,
 				Params: proxy.Params{
 					MaxRetries:    rot.MaxRetries,
+					MaxDisables:   rot.MaxDisables,
 					MaxBodyBuffer: rot.MaxBodyBuffer,
 					CooldownOn:    rot.CooldownOn,
 					DisableOn:     rot.DisableOn,

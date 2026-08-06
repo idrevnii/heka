@@ -66,6 +66,7 @@ func newHandler(t *testing.T, target string, keyIn config.KeyIn, keys ...string)
 		Pool:   pool,
 		Params: Params{
 			MaxRetries:    3,
+			MaxDisables:   1,
 			MaxBodyBuffer: 1 << 20,
 			CooldownOn:    []int{429},
 			DisableOn:     []int{401, 402, 403},
@@ -261,6 +262,84 @@ func TestInvalidKeyDisabled(t *testing.T) {
 	}
 	if snap := pool.Snapshot(); snap[0].State != "disabled" {
 		t.Fatalf("key1 state = %q, want disabled", snap[0].State)
+	}
+}
+
+// A request-level fault makes every key look invalid. The disable budget
+// has to stop that from walking the rotation and emptying the pool.
+func TestInvalidKeyDisableCapped(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	keys := []string{key1, key2, "key-c-cccccccccc", "key-d-dddddddddd"}
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, keys...)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want the upstream 401 passed through", rec.Code)
+	}
+	// One key is spent proving the fault is not key-specific; the second
+	// 401 hits the cap and ends the loop.
+	if up.count() != 2 {
+		t.Fatalf("attempts = %d, want 2", up.count())
+	}
+	var disabled int
+	for _, k := range pool.Snapshot() {
+		if k.State == "disabled" {
+			disabled++
+		}
+	}
+	if disabled != 1 {
+		t.Fatalf("disabled = %d of %d, want 1", disabled, len(keys))
+	}
+}
+
+// max_disables: 0 is a deliberate "never burn a key on a 401" override.
+func TestInvalidKeyDisablesNone(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1, key2)
+	h.Params.MaxDisables = 0
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if up.count() != 1 {
+		t.Fatalf("attempts = %d, want 1", up.count())
+	}
+	for i, k := range pool.Snapshot() {
+		if k.State != "active" {
+			t.Fatalf("key %d state = %q, want active", i, k.State)
+		}
+	}
+}
+
+// The cap must not interfere with cooldowns: 429 keeps sweeping the pool.
+func TestRateLimitedNotCapped(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if n < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	h, _ := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"},
+		key1, key2, "key-c-cccccccccc", "key-d-dddddddddd")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want rotation past the rate-limited keys", rec.Code)
+	}
+	if up.count() != 3 {
+		t.Fatalf("attempts = %d, want 3", up.count())
 	}
 }
 

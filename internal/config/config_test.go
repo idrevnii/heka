@@ -71,6 +71,9 @@ func TestLoadValid(t *testing.T) {
 	if got := cfg.RotationFor("google").MaxRetries; got != 3 {
 		t.Fatalf("google max_retries = %d, want default 3", got)
 	}
+	if rot.MaxDisables != 1 {
+		t.Fatalf("max_disables = %d, want default 1", rot.MaxDisables)
+	}
 	if cfg.Sidecar["cliproxy"].Route != "oauth" {
 		t.Fatalf("sidecar route = %q", cfg.Sidecar["cliproxy"].Route)
 	}

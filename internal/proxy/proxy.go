@@ -23,7 +23,14 @@ import (
 )
 
 type Params struct {
-	MaxRetries    int
+	MaxRetries int
+	// MaxDisables caps how many keys a single request may permanently
+	// disable. A DisableOn status is meant to mean "this key is dead", but
+	// upstreams also return those codes for request-level problems (an
+	// unsupported model, a malformed body), which are identical for every
+	// key. Without a cap one such request walks the rotation and burns the
+	// whole pool.
+	MaxDisables   int
 	MaxBodyBuffer int64
 	CooldownOn    []int
 	DisableOn     []int
@@ -115,6 +122,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lastErr  error
 		attempts int
 		lastV    verdict
+		disabled int
+		capped   bool
 	)
 	for {
 		attempts++
@@ -138,8 +147,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		v := classify(resp, lastErr, h.Params)
 		lastV = v
-		h.report(v, keyIdx, resp)
-		if v == vOK || h.Pool == nil || !replayable || attempts > h.Params.MaxRetries {
+		// Once this request has spent its disable budget, further keys
+		// rejecting the very same request is evidence about the request,
+		// not about the keys. Leave them alone and hand the upstream
+		// response back instead of walking the rest of the pool.
+		capped = v == vInvalidKey && h.Pool != nil && disabled >= h.Params.MaxDisables
+		if capped {
+			h.Log.Warn("disable cap reached",
+				"provider", h.Name,
+				"key", h.Pool.MaskedKey(keyIdx),
+				"status", statusOf(resp, lastErr),
+				"disabled", disabled,
+				"attempt", attempts)
+		} else {
+			h.report(v, keyIdx, resp)
+			if v == vInvalidKey {
+				disabled++
+			}
+		}
+		if v == vOK || capped || h.Pool == nil || !replayable || attempts > h.Params.MaxRetries {
 			break
 		}
 		nextIdx, nextSecret, ok := h.acquire(affinity, bound, tried)
@@ -159,11 +185,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		keyIdx, secret = nextIdx, nextSecret
 	}
 
+	// Records the reason rotation stopped, so a pool-wide 401 that was held
+	// back by the cap is distinguishable in the dashboard from a key that
+	// genuinely got disabled.
+	verdictStr := lastV.String()
+	if capped {
+		verdictStr = "invalid_key_capped"
+	}
+
 	if lastErr != nil {
 		WriteError(w, http.StatusBadGateway, "heka: upstream error: "+lastErr.Error())
 		h.finish(r, start, finishInfo{
 			status: http.StatusBadGateway, attempts: attempts, keyIdx: keyIdx,
-			verdict: lastV.String(), err: lastErr, reqBody: reqSink,
+			verdict: verdictStr, err: lastErr, reqBody: reqSink,
 		})
 		return
 	}
@@ -184,7 +218,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Pool.ReportUsage(keyIdx, usage)
 	}
 	h.finish(r, start, finishInfo{
-		status: resp.StatusCode, attempts: attempts, keyIdx: keyIdx, verdict: lastV.String(),
+		status: resp.StatusCode, attempts: attempts, keyIdx: keyIdx, verdict: verdictStr,
 		reqBody: reqSink, respBody: respSink, streaming: streaming, usage: usage,
 		reqCT: r.Header.Get("Content-Type"), respCT: resp.Header.Get("Content-Type"),
 		respEnc: resp.Header.Get("Content-Encoding"),

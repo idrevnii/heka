@@ -12,6 +12,7 @@ rotation:
   cooldown_base: 60s
   cooldown_max: 1h
   max_retries: 3        # max key switches per request
+  max_disables: 1       # max keys one request may disable; 0 to never disable
   max_body_buffer: 10MiB
   # cooldown_on: [429]           # statuses that cool a key down + retry
   # disable_on: [401, 402, 403]  # statuses that disable a key + retry
