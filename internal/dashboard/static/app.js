@@ -1,32 +1,22 @@
 "use strict";
 
-// --- token handling -------------------------------------------------------
-// The gateway token authenticates every fetch below via the Authorization
-// header, entered once through the prompt below and kept in sessionStorage
-// for the tab's lifetime. It is deliberately never accepted via the URL
-// (query params end up in server access logs and browser history).
-const TOKEN_KEY = "heka_dashboard_token";
-
-function getToken() {
-  return sessionStorage.getItem(TOKEN_KEY) || "";
-}
-
-function setToken(t) {
-  sessionStorage.setItem(TOKEN_KEY, t);
-}
+// --- sign in ---------------------------------------------------------------
+// The session lives in an HttpOnly cookie the server sets on login, so this
+// file never touches a credential after the form is submitted: every fetch
+// below just rides the cookie, and a 401 means the session is gone and the
+// form goes back up.
+let signedIn = false;
 
 async function api(path, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
-  const token = getToken();
-  if (token) headers["Authorization"] = "Bearer " + token;
   if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   const res = await fetch(path, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
-    sessionStorage.removeItem(TOKEN_KEY);
-    showTokenPrompt();
+    showLogin();
     throw new Error("unauthorized");
   }
+  if (!signedIn) hideLogin();
   return res;
 }
 
@@ -43,22 +33,52 @@ async function apiJSON(path, opts) {
   return data;
 }
 
-function showTokenPrompt() {
-  document.getElementById("token-prompt").classList.remove("hidden");
-  document.getElementById("auth-status").textContent = "not authenticated";
+function showLogin() {
+  signedIn = false;
+  document.getElementById("login").classList.remove("hidden");
+  document.getElementById("logout").classList.add("hidden");
+  document.getElementById("login-password").value = "";
 }
 
-function hideTokenPrompt() {
-  document.getElementById("token-prompt").classList.add("hidden");
-  document.getElementById("auth-status").textContent = "";
+function hideLogin() {
+  signedIn = true;
+  document.getElementById("login").classList.add("hidden");
+  document.getElementById("logout").classList.remove("hidden");
+  document.getElementById("login-error").textContent = "";
 }
 
-document.getElementById("token-submit").addEventListener("click", () => {
-  const v = document.getElementById("token-input").value.trim();
-  if (!v) return;
-  setToken(v);
-  hideTokenPrompt();
+document.getElementById("login-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const user = document.getElementById("login-user").value.trim();
+  const password = document.getElementById("login-password").value;
+  const err = document.getElementById("login-error");
+  err.textContent = "";
+  let res;
+  try {
+    // Not api(): a failed login is a plain 401 to show inline, not a
+    // session expiry that should re-open the form.
+    res = await fetch("/dashboard/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user, password }),
+    });
+  } catch (e) {
+    err.textContent = "network error";
+    return;
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    err.textContent = (data && data.error && data.error.message) || res.statusText;
+    document.getElementById("login-password").value = "";
+    return;
+  }
+  hideLogin();
   refreshActiveTab();
+});
+
+document.getElementById("logout").addEventListener("click", async () => {
+  await fetch("/dashboard/api/logout", { method: "POST" }).catch(() => {});
+  showLogin();
 });
 
 // --- tabs ------------------------------------------------------------------
@@ -440,6 +460,7 @@ document.getElementById("config-save").addEventListener("click", async () => {
 
 // --- polling ------------------------------------------------------------------
 setInterval(() => {
+  if (!signedIn) return;
   if (!document.getElementById("auto-refresh").checked) return;
   // The config tab is an editing session, not a live view — polling it
   // would either discard in-progress edits or (with the dirty-check above)
@@ -455,8 +476,7 @@ window.addEventListener("beforeunload", (ev) => {
   }
 });
 
-if (!getToken()) {
-  showTokenPrompt();
-} else {
-  refreshActiveTab();
-}
+// There is no "am I signed in?" endpoint: the first data fetch answers it —
+// it either renders (api() reveals the page) or 401s and api() puts the
+// sign-in form up.
+refreshActiveTab();

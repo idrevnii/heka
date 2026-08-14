@@ -4,8 +4,13 @@
 listen: "127.0.0.1:8787"
 
 auth:
+  # Gateway tokens: what API clients (SDKs, curl) send as their key.
   tokens:
     - ${HEKA_TOKEN}
+  # Dashboard login. The hash comes from `heka -hash`; drop both fields to
+  # turn the dashboard off.
+  user: admin
+  password_hash: ${HEKA_PASSWORD_HASH}
 
 # Rotation defaults; can be overridden per provider with the same section.
 rotation:

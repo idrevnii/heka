@@ -10,6 +10,10 @@ listen: "0.0.0.0:8787"
 auth:
   tokens:
     - "${HEKA_TOKEN}"
+  # Dashboard sign-in. The hash is produced by `heka -hash`; without both
+  # fields /dashboard stays off.
+  user: "${HEKA_USER}"
+  password_hash: "${HEKA_PASSWORD_HASH}"
 
 rotation:
   cooldown_base: 60s

@@ -3,12 +3,15 @@ package server
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/idrevnii/heka/internal/keypool"
 	"github.com/idrevnii/heka/internal/proxy"
@@ -19,28 +22,39 @@ import (
 // swaps it in atomically via Server.Swap, so a single request never sees a
 // mix of old and new routes/tokens.
 type State struct {
-	Tokens        []string
+	// Tokens authorize API clients on the proxy routes.
+	Tokens []string
+	// User and PasswordHash are the dashboard login; empty means no
+	// dashboard. PasswordHash is bcrypt.
+	User          string
+	PasswordHash  string
 	Routes        map[string]http.Handler
 	Pools         map[string]*keypool.Pool
 	SidecarStates map[string]func() string
 }
 
 type Server struct {
-	state atomic.Pointer[State]
-	dash  atomic.Pointer[http.Handler]
-	log   *slog.Logger
+	state    atomic.Pointer[State]
+	dash     atomic.Pointer[http.Handler]
+	sessions *sessions
+	log      *slog.Logger
 }
 
-func New(tokens []string, routes map[string]http.Handler, pools map[string]*keypool.Pool,
-	sidecarStates map[string]func() string, log *slog.Logger) *Server {
-	s := &Server{log: log}
-	s.state.Store(&State{Tokens: tokens, Routes: routes, Pools: pools, SidecarStates: sidecarStates})
+// New builds a server around its initial state.
+func New(st *State, log *slog.Logger) *Server {
+	s := &Server{sessions: newSessions(), log: log}
+	s.state.Store(st)
 	return s
 }
 
 // Swap atomically replaces the state a request is routed/authorized
-// against. Safe to call concurrently with ServeHTTP.
+// against. Safe to call concurrently with ServeHTTP. Open sessions survive
+// an ordinary reload but not a credential change — rotating the password is
+// how you kick out whoever is already signed in.
 func (s *Server) Swap(st *State) {
+	if old := s.state.Load(); old.User != st.User || old.PasswordHash != st.PasswordHash {
+		s.sessions.reset()
+	}
 	s.state.Store(st)
 }
 
@@ -104,17 +118,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveDashboard dispatches everything under /dashboard. The static shell
 // (HTML/CSS/JS) carries no secrets and is served without authentication —
-// the alternative, accepting the gateway token via a ?token= query
-// parameter so a browser navigation could authenticate, means the token
-// ends up in server access logs and the address bar, which isn't worth it
-// just to gate a static page. The JSON API under /dashboard/api/ is what
-// actually needs protecting, and requires the normal bearer token: the
-// page's own JS prompts for it and sends it as an Authorization header on
-// every fetch, never as part of a URL.
+// it is just the login form until someone signs in. The JSON API under
+// /dashboard/api/ is what actually needs protecting: it requires a session
+// cookie handed out by POST /dashboard/api/login in exchange for the
+// configured user and password.
 func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Request) {
 	dash := s.dash.Load()
 	if dash == nil {
 		proxy.WriteError(w, http.StatusNotFound, "heka: dashboard is disabled")
+		return
+	}
+	if st.User == "" || st.PasswordHash == "" {
+		proxy.WriteError(w, http.StatusNotFound,
+			"heka: dashboard is disabled — set auth.user and auth.password_hash to enable it")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -124,17 +140,91 @@ func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Reques
 	// its highlighting/theme rules as inline <style> elements at runtime (a
 	// StyleModule, not a stylesheet load) — standard for any JS-driven
 	// editor. script-src stays 'self'-only; that's the directive that
-	// actually matters against injection on a page holding the gateway
-	// token.
+	// actually matters against injection on a page that can act with the
+	// signed-in session.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:")
 
-	if strings.HasPrefix(r.URL.Path, "/dashboard/api/") && !s.authorized(st, r) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		proxy.WriteError(w, http.StatusUnauthorized, "heka: missing or invalid gateway token")
+	switch r.URL.Path {
+	case "/dashboard/api/login":
+		s.handleLogin(st, w, r)
+		return
+	case "/dashboard/api/logout":
+		s.handleLogout(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/dashboard/api/") && !s.loggedIn(r) {
+		proxy.WriteError(w, http.StatusUnauthorized, "heka: not signed in")
 		return
 	}
 	(*dash).ServeHTTP(w, r)
+}
+
+// loggedIn reports whether the request carries a live session cookie.
+func (s *Server) loggedIn(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookie)
+	return err == nil && s.sessions.valid(c.Value)
+}
+
+func (s *Server) handleLogin(st *State, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		proxy.WriteError(w, http.StatusMethodNotAllowed, "heka: POST only")
+		return
+	}
+	var body struct {
+		User     string `json:"user"`
+		Password string `json:"password"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: invalid request body")
+		return
+	}
+	// bcrypt is deliberately slow, so a wrong password costs the caller the
+	// same ~100ms a right one does — that is the rate limit.
+	userOK := subtle.ConstantTimeCompare([]byte(body.User), []byte(st.User)) == 1
+	passOK := bcrypt.CompareHashAndPassword([]byte(st.PasswordHash), []byte(body.Password)) == nil
+	if !userOK || !passOK {
+		s.log.Warn("dashboard login failed", "user", body.User, "remote", r.RemoteAddr)
+		proxy.WriteError(w, http.StatusUnauthorized, "heka: wrong user or password")
+		return
+	}
+
+	id, err := s.sessions.create()
+	if err != nil {
+		proxy.WriteError(w, http.StatusInternalServerError, "heka: could not start a session")
+		return
+	}
+	http.SetCookie(w, s.newSessionCookie(r, id, int(sessionTTL.Seconds())))
+	s.log.Info("dashboard login", "user", body.User, "remote", r.RemoteAddr)
+	proxy.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		proxy.WriteError(w, http.StatusMethodNotAllowed, "heka: POST only")
+		return
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		s.sessions.drop(c.Value)
+	}
+	http.SetCookie(w, s.newSessionCookie(r, "", -1))
+	proxy.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// newSessionCookie scopes the cookie to /dashboard so it never rides along
+// on a proxied API request, and marks it Secure whenever the browser
+// reached us over TLS — directly or through a terminating reverse proxy.
+func (s *Server) newSessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookie,
+		Value:    value,
+		Path:     "/dashboard",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+	}
 }
 
 // splitRoute splits "/anthropic/v1/messages" into "anthropic" and "/v1/messages".

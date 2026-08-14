@@ -67,6 +67,18 @@ nav#tabs button.active {
   font-size: 12px;
 }
 
+#logout {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#logout.hidden { display: none; }
+
 main {
   padding: 20px;
   max-width: 1200px;
@@ -238,6 +250,14 @@ td.cache { color: var(--muted); }
   color: var(--text);
   padding: 8px;
   border-radius: 6px;
+}
+
+.modal-box p { margin: 0; }
+
+.modal-box .error {
+  color: var(--err);
+  font-size: 12px;
+  min-height: 1em;
 }
 
 .modal-box button {

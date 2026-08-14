@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func write(t *testing.T, content string) string {
@@ -146,6 +148,36 @@ providers:
 	}
 	if got := cfg.Providers["p"].Keys[0]; got != "${NOT_AN_ENV_REF}" {
 		t.Fatalf("escape: %q", got)
+	}
+}
+
+func TestDashboardLoginValidation(t *testing.T) {
+	const provider = `
+providers:
+  p: { base_url: "https://example.com", key_in: { header: h }, keys: [ "k" ] }
+`
+	h, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No login at all is valid: it just means no dashboard.
+	if _, err := Load(write(t, `auth: { tokens: [ "t" ] }`+provider)); err != nil {
+		t.Fatalf("no login configured: %v", err)
+	}
+	cfg, err := Load(write(t, `auth: { tokens: [ "t" ], user: admin, password_hash: "`+string(h)+`" }`+provider))
+	if err != nil {
+		t.Fatalf("full login: %v", err)
+	}
+	if !cfg.Auth.DashboardLogin() {
+		t.Fatal("DashboardLogin() = false with user and hash set")
+	}
+
+	if _, err := Load(write(t, `auth: { tokens: [ "t" ], user: admin }`+provider)); err == nil {
+		t.Fatal("user without password_hash accepted")
+	}
+	if _, err := Load(write(t, `auth: { tokens: [ "t" ], user: admin, password_hash: "plaintext" }`+provider)); err == nil {
+		t.Fatal("non-bcrypt password_hash accepted")
 	}
 }
 

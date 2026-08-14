@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -147,8 +148,38 @@ func (c *Config) CaptureFor(name string) CaptureParams {
 	return p
 }
 
+// Auth holds both credentials heka knows about: the gateway tokens that API
+// clients (SDKs, curl) send as their key, and the single dashboard login the
+// browser signs in with. They are deliberately separate — a token is what a
+// machine can send on every request, a password is what a human types once.
 type Auth struct {
 	Tokens []string `yaml:"tokens"`
+	// User and PasswordHash gate the dashboard. PasswordHash is a bcrypt
+	// hash ("heka -hash" prints one); the plaintext password is never
+	// stored. Leaving both empty turns the dashboard off.
+	User         string `yaml:"user"`
+	PasswordHash string `yaml:"password_hash"`
+}
+
+// DashboardLogin reports whether a dashboard login is configured at all.
+func (a Auth) DashboardLogin() bool {
+	return a.User != "" && a.PasswordHash != ""
+}
+
+// validateLogin rejects a half-configured login (one field without the
+// other) and a password_hash that isn't bcrypt — both are silent lockouts
+// otherwise, discovered only when someone tries to sign in.
+func (a Auth) validateLogin() error {
+	if a.User == "" && a.PasswordHash == "" {
+		return nil
+	}
+	if a.User == "" || a.PasswordHash == "" {
+		return errors.New("auth.user and auth.password_hash must be set together")
+	}
+	if _, err := bcrypt.Cost([]byte(a.PasswordHash)); err != nil {
+		return fmt.Errorf("auth.password_hash is not a bcrypt hash: %w", err)
+	}
+	return nil
 }
 
 // Rotation holds optional overrides; nil fields fall back to the level above.
@@ -594,6 +625,9 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(t) == "" {
 			return fmt.Errorf("auth.tokens[%d] is empty", i)
 		}
+	}
+	if err := c.Auth.validateLogin(); err != nil {
+		return err
 	}
 	if err := c.Rotation.validate("rotation"); err != nil {
 		return err

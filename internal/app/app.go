@@ -504,15 +504,21 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 	}
 
 	// Swap: single atomic pointer store (or first-time construction).
+	st := &server.State{
+		Tokens:        cfg.Auth.Tokens,
+		User:          cfg.Auth.User,
+		PasswordHash:  cfg.Auth.PasswordHash,
+		Routes:        routes,
+		Pools:         pools,
+		SidecarStates: sidecarStates,
+	}
 	if a.srv == nil {
-		a.srv = server.New(cfg.Auth.Tokens, routes, pools, sidecarStates, a.opts.Log)
+		a.srv = server.New(st, a.opts.Log)
 	} else {
-		a.srv.Swap(&server.State{
-			Tokens:        cfg.Auth.Tokens,
-			Routes:        routes,
-			Pools:         pools,
-			SidecarStates: sidecarStates,
-		})
+		a.srv.Swap(st)
+	}
+	if cfg.DefaultDashboard().Enabled && !cfg.Auth.DashboardLogin() {
+		a.opts.Log.Warn("dashboard unreachable: set auth.user and auth.password_hash to sign in")
 	}
 
 	hp := cfg.DefaultHistory()

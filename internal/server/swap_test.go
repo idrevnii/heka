@@ -20,7 +20,7 @@ func TestSwapUnderConcurrentLoad(t *testing.T) {
 	echoA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	echoB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 
-	srv := New([]string{"tok-a"}, map[string]http.Handler{"a": echoA}, nil, nil, log)
+	srv := New(&State{Tokens: []string{"tok-a"}, Routes: map[string]http.Handler{"a": echoA}}, log)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup

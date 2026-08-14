@@ -16,6 +16,9 @@
 #       listen = "127.0.0.1:8787";
 #       # ''${VAR} escapes nix interpolation and lands as ${VAR} in the YAML.
 #       auth.tokens = [ "''${HEKA_TOKEN}" ];
+#       # Dashboard login; the hash comes from `heka -hash`.
+#       auth.user = "admin";
+#       auth.password_hash = "''${HEKA_PASSWORD_HASH}";
 #       providers.anthropic = {
 #         base_url = "https://api.anthropic.com";
 #         key_in.header = "x-api-key";
@@ -75,7 +78,8 @@ in
       default = [ ];
       description = ''
         systemd EnvironmentFile(s) with `KEY=value` lines providing the
-        variables referenced from the config (gateway token, provider keys).
+        variables referenced from the config (gateway token, dashboard
+        password hash, provider keys).
       '';
     };
 

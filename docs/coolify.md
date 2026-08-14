@@ -22,6 +22,17 @@ The Heka token is the value of `SERVICE_PASSWORD_64_HEKA` shown in Coolify.
 Clients use it as their API key. The CLIProxyAPI key is internal and should
 not be given to clients.
 
+The dashboard has its own login, separate from that token: set `HEKA_USER`
+(defaults to `admin`) and `HEKA_PASSWORD_HASH` in Coolify's environment. The
+hash is bcrypt — generate it once with
+
+```sh
+printf '%s' 'your-password' | docker compose run --rm --no-deps -T heka -hash
+```
+
+and paste the `$2a$...` line into `HEKA_PASSWORD_HASH`. Leave both unset and
+`/dashboard` stays off.
+
 `deploy/heka.yaml` in the repo is only a **first-boot seed**. The live,
 authoritative config is `/data/apps/heka/config/heka.yaml` on the host,
 bind-mounted into the `heka` container at `/etc/heka/heka.yaml` (a one-shot
@@ -34,9 +45,9 @@ Ongoing changes — adding a provider, rotating keys, tweaking rotation
 policy — go through either of:
 
 - the dashboard's config editor at `http://10.40.0.10:8787/dashboard` — the
-  page itself is unauthenticated (it carries no secrets), but it prompts for
-  the gateway token on first load and sends it as a normal `Authorization`
-  header on every API call from then on; the token is never put in the URL;
+  page itself is unauthenticated (it carries no secrets, it is just the
+  sign-in form), and signing in with `HEKA_USER` / the dashboard password
+  sets an `HttpOnly` session cookie that authorizes the API calls behind it;
 - editing `/data/apps/heka/config/heka.yaml` directly on the host and
   waiting for Heka's file watcher to pick it up (within `dashboard.watch`,
   10s by default), or sending it `SIGHUP`.

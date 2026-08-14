@@ -9,8 +9,22 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/idrevnii/heka/internal/keypool"
 )
+
+// testPassword is what the dashboard login tests type; testHash is what the
+// config would hold for it.
+const testPassword = "hunter2-and-then-some"
+
+var testHash = func() string {
+	h, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+	if err != nil {
+		panic(err)
+	}
+	return string(h)
+}()
 
 func newServer(t *testing.T) (*Server, *keypool.Pool, *http.Request) {
 	t.Helper()
@@ -20,13 +34,14 @@ func newServer(t *testing.T) (*Server, *keypool.Pool, *http.Request) {
 		w.Header().Set("X-Rest-Path", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 	})
-	srv := New(
-		[]string{"gw-token"},
-		map[string]http.Handler{"anthropic": echo},
-		map[string]*keypool.Pool{"anthropic": pool},
-		map[string]func() string{"cliproxy": func() string { return "healthy" }},
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	)
+	srv := New(&State{
+		Tokens:        []string{"gw-token"},
+		User:          "admin",
+		PasswordHash:  testHash,
+		Routes:        map[string]http.Handler{"anthropic": echo},
+		Pools:         map[string]*keypool.Pool{"anthropic": pool},
+		SidecarStates: map[string]func() string{"cliproxy": func() string { return "healthy" }},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return srv, pool, nil
 }
 

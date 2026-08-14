@@ -2,16 +2,22 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/idrevnii/heka/internal/app"
 	"github.com/idrevnii/heka/internal/dashboard"
@@ -22,7 +28,16 @@ func main() {
 	configPath := flag.String("config", "heka.yaml", "path to config file")
 	seedPath := flag.String("seed", "", "default config copied to -config on first boot if it doesn't exist yet")
 	logJSON := flag.Bool("log-json", false, "log as JSON instead of text")
+	hash := flag.Bool("hash", false, "read a password from stdin and print its bcrypt hash for auth.password_hash")
 	flag.Parse()
+
+	if *hash {
+		if err := printHash(os.Stdin, os.Stdout); err != nil {
+			slog.Error("hash", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	var base slog.Handler = slog.NewTextHandler(os.Stderr, nil)
 	if *logJSON {
@@ -33,6 +48,27 @@ func main() {
 		slog.New(base).Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// printHash turns a password on stdin into the bcrypt hash that goes into
+// auth.password_hash: `echo -n 'secret' | heka -hash`. Whatever comes after
+// the first line is ignored, and a trailing newline is not part of the
+// password.
+func printHash(in io.Reader, out io.Writer) error {
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	password := strings.TrimRight(line, "\r\n")
+	if password == "" {
+		return errors.New("empty password on stdin")
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, string(h))
+	return err
 }
 
 func run(configPath, seedPath string, base slog.Handler) error {

@@ -14,7 +14,9 @@
     <button data-tab="requests">Requests</button>
     <button data-tab="config">Config</button>
   </nav>
-  <div id="auth-status"></div>
+  <div id="auth-status">
+    <button id="logout" class="hidden">Log out</button>
+  </div>
 </header>
 
 <main>
@@ -57,12 +59,14 @@
 
 </main>
 
-<div id="token-prompt" class="modal hidden">
-  <div class="modal-box">
-    <p>Gateway token required.</p>
-    <input id="token-input" type="password" placeholder="gateway token">
-    <button id="token-submit">Continue</button>
-  </div>
+<div id="login" class="modal hidden">
+  <form id="login-form" class="modal-box">
+    <p>Sign in</p>
+    <input id="login-user" type="text" placeholder="user" autocomplete="username" autofocus>
+    <input id="login-password" type="password" placeholder="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    <p id="login-error" class="error"></p>
+  </form>
 </div>
 
 <script src="codemirror.bundle.js"></script>
