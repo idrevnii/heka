@@ -1,6 +1,7 @@
 package keypool
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ func TestRoundRobin(t *testing.T) {
 func TestCooldownAndExpiry(t *testing.T) {
 	p, now := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
 	idx, _ := mustAcquire(t, p, nil)
-	if d := p.ReportRateLimited(idx, 0, false); d != time.Minute {
+	if d := p.ReportRateLimited(idx, 0, false, ErrorDetail{}); d != time.Minute {
 		t.Fatalf("first cooldown = %v, want 1m", d)
 	}
 	// While key 0 cools down, only key 1 is picked.
@@ -68,13 +69,13 @@ func TestExponentialCooldown(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute}
 	for _, w := range want {
-		if d := p.ReportRateLimited(0, 0, false); d != w {
+		if d := p.ReportRateLimited(0, 0, false, ErrorDetail{}); d != w {
 			t.Fatalf("cooldown = %v, want %v", d, w)
 		}
 	}
 	// Success resets the streak.
 	p.ReportSuccess(0)
-	if d := p.ReportRateLimited(0, 0, false); d != time.Minute {
+	if d := p.ReportRateLimited(0, 0, false, ErrorDetail{}); d != time.Minute {
 		t.Fatalf("cooldown after success = %v, want 1m", d)
 	}
 }
@@ -82,28 +83,28 @@ func TestExponentialCooldown(t *testing.T) {
 func TestCooldownCap(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	for range 30 {
-		p.ReportRateLimited(0, 0, false)
+		p.ReportRateLimited(0, 0, false, ErrorDetail{})
 	}
-	if d := p.ReportRateLimited(0, 0, false); d != time.Hour {
+	if d := p.ReportRateLimited(0, 0, false, ErrorDetail{}); d != time.Hour {
 		t.Fatalf("cooldown = %v, want cap 1h", d)
 	}
 	// Retry-After above the cap is clamped too.
-	if d := p.ReportRateLimited(0, 24*time.Hour, true); d != time.Hour {
+	if d := p.ReportRateLimited(0, 24*time.Hour, true, ErrorDetail{}); d != time.Hour {
 		t.Fatalf("retry-after cooldown = %v, want cap 1h", d)
 	}
 }
 
 func TestRetryAfterWins(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
-	if d := p.ReportRateLimited(0, 7*time.Second, true); d != 7*time.Second {
+	if d := p.ReportRateLimited(0, 7*time.Second, true, ErrorDetail{}); d != 7*time.Second {
 		t.Fatalf("cooldown = %v, want 7s", d)
 	}
 }
 
 func TestAllCoolingPicksEarliest(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
-	p.ReportRateLimited(0, 10*time.Minute, true)
-	p.ReportRateLimited(1, time.Minute, true)
+	p.ReportRateLimited(0, 10*time.Minute, true, ErrorDetail{})
+	p.ReportRateLimited(1, time.Minute, true, ErrorDetail{})
 	if idx, _ := mustAcquire(t, p, nil); idx != 1 {
 		t.Fatalf("picked %d, want 1 (earliest cooldown)", idx)
 	}
@@ -111,19 +112,67 @@ func TestAllCoolingPicksEarliest(t *testing.T) {
 
 func TestDisabledAndReset(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
-	p.ReportInvalid(0)
+	p.ReportInvalid(0, ErrorDetail{})
 	for range 3 {
 		if idx, _ := mustAcquire(t, p, nil); idx == 0 {
 			t.Fatal("picked disabled key")
 		}
 	}
-	p.ReportInvalid(1)
+	p.ReportInvalid(1, ErrorDetail{})
 	if _, _, ok := p.Acquire(nil); ok {
 		t.Fatal("Acquire succeeded with all keys disabled")
 	}
 	p.Reset()
 	if _, _, ok := p.Acquire(nil); !ok {
 		t.Fatal("Acquire failed after Reset")
+	}
+}
+
+func TestResetKeyOnlyTouchesThatKey(t *testing.T) {
+	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	p.ReportInvalid(0, ErrorDetail{Status: 401, Message: "revoked"})
+	p.ReportInvalid(1, ErrorDetail{Status: 401, Message: "revoked"})
+
+	if !p.ResetKey(0) {
+		t.Fatal("ResetKey(0) = false")
+	}
+	snap := p.Snapshot()
+	if snap[0].State != "active" || snap[0].LastError != nil {
+		t.Fatalf("key 0 after reset = %+v, want active with no error", snap[0])
+	}
+	if snap[1].State != "disabled" || snap[1].LastError == nil {
+		t.Fatalf("key 1 = %+v, want still disabled", snap[1])
+	}
+	// Counters are history, not state: a reset must not erase them.
+	if snap[0].Failures != 1 {
+		t.Fatalf("key 0 failures = %d, want 1", snap[0].Failures)
+	}
+	if p.ResetKey(2) || p.ResetKey(-1) {
+		t.Fatal("ResetKey out of range = true, want false")
+	}
+}
+
+func TestLastErrorRecordedAndCleared(t *testing.T) {
+	p, now := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+	p.ReportInvalid(0, ErrorDetail{Status: 401, Message: `{"error":"invalid x-api-key"}`})
+	p.ReportRateLimited(1, time.Minute, true, ErrorDetail{Status: 429, Message: "slow down"})
+
+	snap := p.Snapshot()
+	if e := snap[0].LastError; e == nil || e.Reason != "invalid_key" || e.Status != 401 ||
+		!strings.Contains(e.Message, "invalid x-api-key") || !e.At.Equal(*now) {
+		t.Fatalf("key 0 last error = %+v", snap[0].LastError)
+	}
+	if e := snap[1].LastError; e == nil || e.Reason != "rate_limited" || e.Status != 429 {
+		t.Fatalf("key 1 last error = %+v", snap[1].LastError)
+	}
+	// Snapshot indices are the handle the dashboard resets by.
+	if snap[0].Index != 0 || snap[1].Index != 1 {
+		t.Fatalf("indices = %d,%d", snap[0].Index, snap[1].Index)
+	}
+
+	p.ReportSuccess(0)
+	if e := p.Snapshot()[0].LastError; e != nil {
+		t.Fatalf("last error after success = %+v, want nil", e)
 	}
 }
 
@@ -141,8 +190,8 @@ func TestTriedExcluded(t *testing.T) {
 
 func TestSnapshotAndMask(t *testing.T) {
 	p, _ := testPool("sk-ant-api03-verysecret0001", "sk-ant-api03-verysecret0002")
-	p.ReportRateLimited(0, time.Minute, true)
-	p.ReportInvalid(1)
+	p.ReportRateLimited(0, time.Minute, true, ErrorDetail{})
+	p.ReportInvalid(1, ErrorDetail{})
 	snap := p.Snapshot()
 	if snap[0].State != "cooldown" || snap[0].CooldownUntil == nil {
 		t.Fatalf("key 0 state = %+v, want cooldown", snap[0])
@@ -163,7 +212,7 @@ func TestSnapshotAndMask(t *testing.T) {
 
 func TestSuccessClearsCooldown(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
-	p.ReportRateLimited(0, time.Hour, true)
+	p.ReportRateLimited(0, time.Hour, true, ErrorDetail{})
 	if p.Snapshot()[0].State != "cooldown" {
 		t.Fatal("expected cooldown before success")
 	}
@@ -222,7 +271,7 @@ func TestAffinityMinimalDisruption(t *testing.T) {
 		before[i] = idx
 	}
 	// Bench one key: only the sessions bound to it may move.
-	p.ReportRateLimited(0, 10*time.Minute, true)
+	p.ReportRateLimited(0, 10*time.Minute, true, ErrorDetail{})
 	moved, stayed := 0, 0
 	for i, was := range before {
 		idx, _, _ := p.AcquireFor(i, nil)
@@ -281,13 +330,13 @@ func TestAffinityRetryIsDeterministic(t *testing.T) {
 
 func TestAffinityAllCoolingFallback(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
-	p.ReportRateLimited(0, 10*time.Minute, true)
-	p.ReportRateLimited(1, time.Minute, true)
+	p.ReportRateLimited(0, 10*time.Minute, true, ErrorDetail{})
+	p.ReportRateLimited(1, time.Minute, true, ErrorDetail{})
 	if idx, _, _ := p.AcquireFor(1, nil); idx != 1 {
 		t.Fatalf("picked %d, want 1 (earliest cooldown)", idx)
 	}
-	p.ReportInvalid(0)
-	p.ReportInvalid(1)
+	p.ReportInvalid(0, ErrorDetail{})
+	p.ReportInvalid(1, ErrorDetail{})
 	if _, _, ok := p.AcquireFor(1, nil); ok {
 		t.Fatal("AcquireFor succeeded with all keys disabled")
 	}
@@ -297,7 +346,7 @@ func TestRetryAfterZeroFloor(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	// "Retry-After: 0" is a provider-declared immediate retry, not a missing
 	// header — the exponential schedule must not kick in.
-	if d := p.ReportRateLimited(0, 0, true); d != time.Second {
+	if d := p.ReportRateLimited(0, 0, true, ErrorDetail{}); d != time.Second {
 		t.Fatalf("cooldown = %v, want 1s floor", d)
 	}
 }

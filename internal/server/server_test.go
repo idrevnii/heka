@@ -136,7 +136,7 @@ func TestGoogHeaderAuth(t *testing.T) {
 
 func TestStatusAndReset(t *testing.T) {
 	srv, pool, _ := newServer(t)
-	pool.ReportInvalid(0)
+	pool.ReportInvalid(0, keypool.ErrorDetail{})
 
 	rec := do(srv, "GET", "/status", "gw-token")
 	if rec.Code != http.StatusOK {
@@ -163,5 +163,24 @@ func TestStatusAndReset(t *testing.T) {
 	}
 	if pool.Snapshot()[0].State != "active" {
 		t.Fatal("reset did not clear disabled state")
+	}
+}
+
+func TestStatusResetSingleKey(t *testing.T) {
+	srv, pool, _ := newServer(t)
+	pool.ReportInvalid(0, keypool.ErrorDetail{Status: 401, Message: "revoked"})
+
+	if rec := do(srv, "POST", "/status/reset?provider=anthropic&key=1", "gw-token"); rec.Code != http.StatusNotFound {
+		t.Fatalf("reset out-of-range key = %d, want 404", rec.Code)
+	}
+	if rec := do(srv, "POST", "/status/reset?provider=anthropic&key=x", "gw-token"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("reset non-numeric key = %d, want 400", rec.Code)
+	}
+	if rec := do(srv, "POST", "/status/reset?provider=anthropic&key=0", "gw-token"); rec.Code != http.StatusOK {
+		t.Fatalf("reset key 0 = %d", rec.Code)
+	}
+	snap := pool.Snapshot()[0]
+	if snap.State != "active" || snap.LastError != nil {
+		t.Fatalf("key after reset = %+v, want active with no error", snap)
 	}
 }

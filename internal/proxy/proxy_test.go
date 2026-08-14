@@ -296,6 +296,77 @@ func TestInvalidKeyDisableCapped(t *testing.T) {
 	}
 }
 
+// The error text a disabled key carries is peeked out of the upstream
+// response — which must still reach the client intact.
+func TestInvalidKeyRecordsUpstreamError(t *testing.T) {
+	const body = `{"error":{"type":"authentication_error","message":"invalid x-api-key"}}`
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, body)
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Body.String() != body {
+		t.Fatalf("forwarded body = %q, want the upstream body unchanged", rec.Body.String())
+	}
+	e := pool.Snapshot()[0].LastError
+	if e == nil || e.Status != http.StatusUnauthorized || e.Reason != "invalid_key" {
+		t.Fatalf("last error = %+v", e)
+	}
+	if e.Message != body {
+		t.Fatalf("recorded message = %q, want %q", e.Message, body)
+	}
+}
+
+// A rate limit is a temporary state, but why it happened is still worth
+// keeping — quota exhausted and per-minute throttling look identical
+// otherwise.
+func TestRateLimitRecordsUpstreamError(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, "rate limit exceeded")
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1)
+	h.Params.MaxRetries = 0
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Body.String() != "rate limit exceeded" {
+		t.Fatalf("forwarded body = %q", rec.Body.String())
+	}
+	e := pool.Snapshot()[0].LastError
+	if e == nil || e.Reason != "rate_limited" || e.Status != http.StatusTooManyRequests ||
+		e.Message != "rate limit exceeded" {
+		t.Fatalf("last error = %+v", e)
+	}
+}
+
+// An error body longer than the peek budget must not truncate what the
+// client receives.
+func TestErrorPeekDoesNotTruncateResponse(t *testing.T) {
+	big := strings.Repeat("e", errPeekMax*2)
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, big)
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Api-Key"}, key1)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
+
+	if rec.Body.String() != big {
+		t.Fatalf("forwarded body length = %d, want %d", rec.Body.Len(), len(big))
+	}
+	if e := pool.Snapshot()[0].LastError; e == nil || len(e.Message) != errPeekMax {
+		t.Fatalf("recorded message length = %d, want %d", len(e.Message), errPeekMax)
+	}
+}
+
 // max_disables: 0 is a deliberate "never burn a key on a 401" override.
 func TestInvalidKeyDisablesNone(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
@@ -381,7 +452,7 @@ func TestUnreachableUpstream(t *testing.T) {
 
 func TestAllKeysDisabledReturns503(t *testing.T) {
 	h, pool := newHandler(t, "http://127.0.0.1:1", config.KeyIn{Header: "X-Api-Key"}, key1)
-	pool.ReportInvalid(0)
+	pool.ReportInvalid(0, keypool.ErrorDetail{})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", strings.NewReader("{}")))
 	if rec.Code != http.StatusServiceUnavailable {

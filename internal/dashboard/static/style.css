@@ -219,6 +219,31 @@ td.cache { color: var(--muted); }
   outline: 1px solid var(--err);
 }
 
+/* Per-key controls: quiet enough not to compete with the state pill, but
+   always visible — an operator shouldn't have to hunt for the reset. */
+td.key-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+td.key-actions button.link {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  margin-left: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+td.key-actions button.link:hover { color: var(--text); border-color: var(--accent); }
+td.key-actions button.link:disabled { opacity: 0.5; cursor: default; }
+
+tr.key-error.hidden { display: none; }
+tr.key-error td { max-width: none; white-space: normal; padding: 0 10px 10px; }
+tr.key-error .detail { margin: 0; max-height: 40vh; }
+
 .proxy-block { margin-bottom: 14px; }
 .proxy-block h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
 

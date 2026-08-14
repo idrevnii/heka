@@ -326,6 +326,21 @@ func (a *App) ResetStatus(provider string) ([]string, error) {
 	return reset, nil
 }
 
+// ResetStatusKey clears cooldown/disabled state for a single key of one
+// provider, identified by its index in the status snapshot.
+func (a *App) ResetStatusKey(provider string, key int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pi, ok := a.providers[provider]
+	if !ok {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	if !pi.pool.ResetKey(key) {
+		return fmt.Errorf("provider %q has no key %d", provider, key)
+	}
+	return nil
+}
+
 // Shutdown stops the root context (tearing down every sidecar supervisor,
 // including ones already retired-but-pending from earlier reloads) and
 // waits for everything to finish, up to timeout.

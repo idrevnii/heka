@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -342,14 +343,69 @@ func (h *Handler) report(v verdict, idx int, resp *http.Response) {
 		h.Pool.ReportSuccess(idx)
 	case vRateLimited:
 		ra, hasRA := retryAfter(resp)
-		d := h.Pool.ReportRateLimited(idx, ra, hasRA)
+		d := h.Pool.ReportRateLimited(idx, ra, hasRA, peekError(resp))
 		h.Log.Warn("key cooling down", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "cooldown", d)
 	case vInvalidKey:
-		h.Pool.ReportInvalid(idx)
+		h.Pool.ReportInvalid(idx, peekError(resp))
 		h.Log.Warn("key disabled", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "status", resp.StatusCode)
 	case vRetryable:
 		h.Pool.ReportFailure(idx)
 	}
+}
+
+// errPeekMax caps how much of a rejection the pool remembers per key. Error
+// bodies are short JSON objects; this is roomy enough to hold one whole and
+// small enough that a pool of them can't grow into a memory problem.
+const errPeekMax = 8 << 10
+
+// peekError reads the head of an error response so the key pool can record
+// what the provider actually said, then splices the bytes back in front of
+// the body. The response is still fully forwardable afterwards: this runs on
+// responses that either get drained before a retry or copied to the client,
+// and both see the original bytes.
+func peekError(resp *http.Response) keypool.ErrorDetail {
+	if resp == nil {
+		return keypool.ErrorDetail{}
+	}
+	d := keypool.ErrorDetail{Status: resp.StatusCode}
+	if resp.Body == nil {
+		return d
+	}
+	head, err := io.ReadAll(io.LimitReader(resp.Body, errPeekMax))
+	if len(head) > 0 {
+		body := resp.Body
+		resp.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(head), body), Closer: body}
+	}
+	if err != nil {
+		// Whatever was read is still worth showing; say why it's partial.
+		d.Message = errorText(head, resp.Header.Get("Content-Encoding")) + "\n(truncated: " + err.Error() + ")"
+		return d
+	}
+	d.Message = errorText(head, resp.Header.Get("Content-Encoding"))
+	return d
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// errorText renders peeked bytes as something displayable: gunzipped when
+// the upstream compressed them (a peek can cut a gzip stream mid-way, so a
+// partial read is kept rather than discarded), and scrubbed of invalid UTF-8
+// so it survives JSON encoding.
+func errorText(b []byte, contentEncoding string) string {
+	if len(b) == 0 {
+		return ""
+	}
+	if contentEncoding == "gzip" {
+		if gr, err := gzip.NewReader(bytes.NewReader(b)); err == nil {
+			if out, _ := io.ReadAll(gr); len(out) > 0 {
+				b = out
+			}
+		}
+	}
+	return strings.ToValidUTF8(string(b), "�")
 }
 
 func classify(resp *http.Response, err error, p Params) verdict {

@@ -34,6 +34,40 @@ type key struct {
 	successes     uint64
 	failures      uint64
 	usage         Usage
+	lastError     *KeyError
+}
+
+// ErrorDetail is what the provider said when it rejected a key: the HTTP
+// status and as much of the response body as the caller was willing to read.
+// A zero value means the failure carried no upstream response.
+type ErrorDetail struct {
+	Status  int
+	Message string
+}
+
+// KeyError is the last rejection recorded against a key, kept so the
+// dashboard can explain *why* a key is disabled or cooling instead of only
+// naming the state. Cleared when the key next succeeds, or on reset.
+type KeyError struct {
+	At      time.Time `json:"at"`
+	Reason  string    `json:"reason"` // "invalid_key" | "rate_limited"
+	Status  int       `json:"status,omitempty"`
+	Message string    `json:"message,omitempty"`
+}
+
+// record replaces the key's last error. The KeyError is never mutated after
+// this, so Snapshot can hand the pointer out without copying.
+func (k *key) record(reason string, d ErrorDetail, now time.Time) {
+	k.lastError = &KeyError{At: now, Reason: reason, Status: d.Status, Message: d.Message}
+}
+
+// reset returns the key to the state it had at startup, leaving the counters
+// and usage totals (which are history, not state) alone.
+func (k *key) reset() {
+	k.disabled = false
+	k.cooldownUntil = time.Time{}
+	k.consecLimited = 0
+	k.lastError = nil
 }
 
 // Usage is the token accounting reported by a provider for one response,
@@ -138,8 +172,10 @@ func (p *Pool) ReportSuccess(idx int) {
 	k.successes++
 	k.consecLimited = 0
 	// A key that just worked is not rate-limited, whatever an earlier
-	// cooldown said (it can be reached via Acquire's all-cooling fallback).
+	// cooldown said (it can be reached via Acquire's all-cooling fallback),
+	// and whatever it last complained about is no longer its problem.
 	k.cooldownUntil = time.Time{}
+	k.lastError = nil
 }
 
 // ReportUsage adds one response's token accounting to the key's totals.
@@ -157,13 +193,15 @@ func (p *Pool) ReportUsage(idx int, u Usage) {
 
 // ReportRateLimited puts the key into cooldown: for retryAfter if the
 // provider supplied the header (hasRetryAfter), otherwise exponentially by
-// consecutive 429s. Returns the applied cooldown.
-func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration, hasRetryAfter bool) time.Duration {
+// consecutive 429s. detail is the upstream's own explanation, kept for the
+// dashboard. Returns the applied cooldown.
+func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration, hasRetryAfter bool, detail ErrorDetail) time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	k := p.keys[idx]
 	k.failures++
 	k.consecLimited++
+	k.record("rate_limited", detail, p.now())
 	var d time.Duration
 	if hasRetryAfter {
 		// "Retry-After: 0" means retry now; a small floor keeps the
@@ -180,13 +218,16 @@ func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration, hasRetryAfte
 	return d
 }
 
-// ReportInvalid disables the key until Reset or process restart.
-func (p *Pool) ReportInvalid(idx int) {
+// ReportInvalid disables the key until Reset or process restart. detail is
+// the upstream's own explanation, kept for the dashboard — a disabled key is
+// the one state an operator can't diagnose from the state name alone.
+func (p *Pool) ReportInvalid(idx int, detail ErrorDetail) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	k := p.keys[idx]
 	k.failures++
 	k.disabled = true
+	k.record("invalid_key", detail, p.now())
 }
 
 // ReportFailure counts a retryable failure (5xx / network) without changing
@@ -201,13 +242,27 @@ func (p *Pool) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, k := range p.keys {
-		k.disabled = false
-		k.cooldownUntil = time.Time{}
-		k.consecLimited = 0
+		k.reset()
 	}
 }
 
+// ResetKey clears cooldown/disabled state for a single key, identified by
+// its index in Snapshot. Reports false when idx is outside the pool — which
+// is what a stale dashboard tab sees after a reload shrank the key list.
+func (p *Pool) ResetKey(idx int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return false
+	}
+	p.keys[idx].reset()
+	return true
+}
+
 type KeyStatus struct {
+	// Index is the key's position in the pool — the handle the dashboard
+	// passes back to reset this one key.
+	Index         int        `json:"index"`
 	Key           string     `json:"key"`
 	State         string     `json:"state"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
@@ -222,6 +277,9 @@ type KeyStatus struct {
 	// reported no input tokens at all (search APIs, or a pool that hasn't
 	// served a request yet).
 	CacheHitRate *float64 `json:"cache_hit_rate"`
+	// LastError is why the key was last rejected, present until it succeeds
+	// again or is reset.
+	LastError *KeyError `json:"last_error,omitempty"`
 }
 
 func (p *Pool) Snapshot() []KeyStatus {
@@ -231,7 +289,8 @@ func (p *Pool) Snapshot() []KeyStatus {
 	out := make([]KeyStatus, len(p.keys))
 	for i, k := range p.keys {
 		st := KeyStatus{
-			Key: p.masks[i], State: "active", Successes: k.successes, Failures: k.failures,
+			Index: i, Key: p.masks[i], State: "active", Successes: k.successes, Failures: k.failures,
+			LastError:        k.lastError,
 			InputTokens:      k.usage.Input,
 			CacheReadTokens:  k.usage.CacheRead,
 			CacheWriteTokens: k.usage.CacheWrite,

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -313,6 +314,22 @@ func (s *Server) handleReset(st *State, w http.ResponseWriter, r *http.Request) 
 		pool, ok := st.Pools[name]
 		if !ok {
 			proxy.WriteError(w, http.StatusNotFound, fmt.Sprintf("heka: unknown provider %q", name))
+			return
+		}
+		// ?key=<index> resets that one key (indices are the ones /status
+		// reports); without it the whole provider is reset.
+		if raw := r.URL.Query().Get("key"); raw != "" {
+			idx, err := strconv.Atoi(raw)
+			if err != nil {
+				proxy.WriteError(w, http.StatusBadRequest, "heka: invalid key index")
+				return
+			}
+			if !pool.ResetKey(idx) {
+				proxy.WriteError(w, http.StatusNotFound, fmt.Sprintf("heka: provider %q has no key %d", name, idx))
+				return
+			}
+			s.log.Info("key state reset", "provider", name, "key", pool.MaskedKey(idx))
+			proxy.WriteJSON(w, http.StatusOK, map[string]any{"reset": []string{name}, "key": idx})
 			return
 		}
 		pool.Reset()

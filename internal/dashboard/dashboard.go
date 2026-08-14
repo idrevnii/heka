@@ -38,6 +38,7 @@ type Backend interface {
 	DashboardParams() config.DashboardParams
 	StatusSnapshot() map[string]any
 	ResetStatus(provider string) ([]string, error)
+	ResetStatusKey(provider string, key int) error
 }
 
 type Handler struct {
@@ -188,8 +189,31 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	proxy.WriteJSON(w, http.StatusOK, h.backend.StatusSnapshot())
 }
 
+// handleStatusReset clears key state: the whole gateway, one provider
+// (?provider=), or a single key of one provider (?provider=&key=<index>) —
+// the last being how the dashboard's per-key button un-benches a key an
+// operator has just fixed upstream.
 func (h *Handler) handleStatusReset(w http.ResponseWriter, r *http.Request) {
-	reset, err := h.backend.ResetStatus(r.URL.Query().Get("provider"))
+	q := r.URL.Query()
+	provider := q.Get("provider")
+	if raw := q.Get("key"); raw != "" {
+		if provider == "" {
+			proxy.WriteError(w, http.StatusBadRequest, "heka: key requires provider")
+			return
+		}
+		idx, err := strconv.Atoi(raw)
+		if err != nil {
+			proxy.WriteError(w, http.StatusBadRequest, "heka: invalid key index")
+			return
+		}
+		if err := h.backend.ResetStatusKey(provider, idx); err != nil {
+			proxy.WriteError(w, http.StatusNotFound, "heka: "+err.Error())
+			return
+		}
+		proxy.WriteJSON(w, http.StatusOK, map[string]any{"reset": []string{provider}, "key": idx})
+		return
+	}
+	reset, err := h.backend.ResetStatus(provider)
 	if err != nil {
 		proxy.WriteError(w, http.StatusNotFound, "heka: "+err.Error())
 		return

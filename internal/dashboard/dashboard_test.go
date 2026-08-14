@@ -23,6 +23,7 @@ type fakeBackend struct {
 	applyErr  error
 	applied   string
 	statusMap map[string]any
+	resetKeys []string
 }
 
 func (f *fakeBackend) ReadConfig() ([]byte, string, string, error) {
@@ -63,6 +64,17 @@ func (f *fakeBackend) ResetStatus(provider string) ([]string, error) {
 		return nil, errors.New("unknown provider")
 	}
 	return []string{provider}, nil
+}
+
+func (f *fakeBackend) ResetStatusKey(provider string, key int) error {
+	if provider == "missing" {
+		return errors.New("unknown provider")
+	}
+	if key != 0 {
+		return errors.New("no such key")
+	}
+	f.resetKeys = append(f.resetKeys, provider)
+	return nil
 }
 
 func newTestHandler() (*Handler, *fakeBackend, *history.Store) {
@@ -171,6 +183,32 @@ func TestStatusResetUnknownProvider(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/status/reset?provider=missing", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestStatusResetSingleKey(t *testing.T) {
+	h, be, _ := newTestHandler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/status/reset?provider=anthropic&key=0", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if len(be.resetKeys) != 1 || be.resetKeys[0] != "anthropic" {
+		t.Fatalf("backend saw %v, want one anthropic key reset", be.resetKeys)
+	}
+
+	for _, q := range []string{"?key=0", "?provider=anthropic&key=nope"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/status/reset"+q, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("reset %q = %d, want 400", q, rec.Code)
+		}
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/status/reset?provider=anthropic&key=9", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reset out-of-range key = %d, want 404", rec.Code)
 	}
 }
 

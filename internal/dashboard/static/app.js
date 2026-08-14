@@ -178,15 +178,8 @@ async function loadOverview() {
       const table = el("table", {}, []);
       const tbody = el("tbody", {}, []);
       for (const k of keys) {
-        tbody.appendChild(
-          el("tr", {}, [
-            el("td", {}, [k.key]),
-            el("td", {}, [el("span", { class: "pill " + k.state }, [k.state])]),
-            el("td", {}, [String(k.successes) + " ok"]),
-            el("td", {}, [String(k.failures) + " fail"]),
-            el("td", { class: "cache", title: cacheTitle(k) }, [fmtCache(k)]),
-          ])
-        );
+        tbody.appendChild(keyRow(name, k));
+        if (k.last_error) tbody.appendChild(keyErrorRow(name, k));
       }
       table.appendChild(tbody);
       block.appendChild(table);
@@ -256,6 +249,84 @@ async function loadRequests() {
     tr.addEventListener("click", () => showRequestDetail(r.id));
     tbody.appendChild(tr);
   }
+}
+
+// --- key rows -----------------------------------------------------------------
+// Which key-error panels are open, as "provider#index". The overview
+// re-renders from scratch every 3s, so open panels have to be remembered
+// here or they'd snap shut under the poll.
+const expandedKeys = new Set();
+
+function keyTag(provider, k) {
+  return provider + "#" + k.index;
+}
+
+function keyRow(provider, k) {
+  const actions = el("td", { class: "key-actions" }, []);
+  if (k.last_error) {
+    const toggle = el("button", { class: "link", title: "show the provider's own error" }, [
+      expandedKeys.has(keyTag(provider, k)) ? "hide error" : "why?",
+    ]);
+    toggle.addEventListener("click", () => {
+      const tag = keyTag(provider, k);
+      if (expandedKeys.has(tag)) expandedKeys.delete(tag);
+      else expandedKeys.add(tag);
+      loadOverview();
+    });
+    actions.appendChild(toggle);
+  }
+  const reset = el("button", { class: "link", title: "clear cooldown/disabled state for this key" }, ["reset"]);
+  reset.addEventListener("click", () => resetKey(provider, k, reset));
+  actions.appendChild(reset);
+
+  return el("tr", {}, [
+    el("td", {}, [k.key]),
+    el("td", {}, [el("span", { class: "pill " + k.state }, [k.state])]),
+    el("td", {}, [String(k.successes) + " ok"]),
+    el("td", {}, [String(k.failures) + " fail"]),
+    el("td", { class: "cache", title: cacheTitle(k) }, [fmtCache(k)]),
+    actions,
+  ]);
+}
+
+// keyErrorRow is the expandable panel under a key: the status code and the
+// upstream's verbatim body, which is the only thing that says whether a
+// disabled key is revoked, out of credit, or merely mistyped.
+function keyErrorRow(provider, k) {
+  const open = expandedKeys.has(keyTag(provider, k));
+  const e = k.last_error;
+  const head = e.reason + (e.status ? " · HTTP " + e.status : "") + " · " + fmtTime(e.at);
+  return el("tr", { class: "key-error" + (open ? "" : " hidden") }, [
+    el("td", { colspan: "6" }, [
+      el("pre", { class: "detail" }, [head + "\n\n" + (prettyJSON(e.message) || "(no response body)")]),
+    ]),
+  ]);
+}
+
+function prettyJSON(text) {
+  if (!text) return "";
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch (err) {
+    return text;
+  }
+}
+
+async function resetKey(provider, k, button) {
+  button.disabled = true;
+  try {
+    await apiJSON(
+      "/dashboard/api/status/reset?provider=" + encodeURIComponent(provider) + "&key=" + k.index,
+      { method: "POST" }
+    );
+    expandedKeys.delete(keyTag(provider, k));
+  } catch (err) {
+    button.textContent = "failed";
+    button.title = err.message;
+    button.disabled = false;
+    return;
+  }
+  loadOverview();
 }
 
 // Cache hit rate is the payoff of key affinity: a pool answering from warm
