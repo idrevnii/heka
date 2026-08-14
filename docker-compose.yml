@@ -12,9 +12,11 @@ services:
     restart: unless-stopped
     environment:
       HEKA_TOKEN: "${SERVICE_PASSWORD_64_HEKA}"
-      HEKA_USER: "${HEKA_USER:-admin}"
-      # bcrypt hash of the dashboard password: docker compose run --rm heka -hash
-      HEKA_PASSWORD_HASH: "${HEKA_PASSWORD_HASH}"
+      # Dashboard login. Both empty (the default) means no dashboard — set
+      # HEKA_PASSWORD_HASH to turn it on; the user then defaults to "admin".
+      #   printf '%s' 'password' | docker compose run --rm --no-deps -T heka -hash
+      HEKA_USER: "${HEKA_USER:-}"
+      HEKA_PASSWORD_HASH: "${HEKA_PASSWORD_HASH:-}"
       CLIPROXY_API_KEY: "${SERVICE_PASSWORD_64_CLIPROXY}"
       COOLIFY_APP_NAME: heka
     ports:

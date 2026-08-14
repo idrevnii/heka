@@ -7,10 +7,11 @@ auth:
   # Gateway tokens: what API clients (SDKs, curl) send as their key.
   tokens:
     - ${HEKA_TOKEN}
-  # Dashboard login. The hash comes from `heka -hash`; drop both fields to
-  # turn the dashboard off.
-  user: admin
-  password_hash: ${HEKA_PASSWORD_HASH}
+  # Dashboard login. Without it /dashboard is off; uncomment to turn it on.
+  # The hash comes from `printf '%s' 'password' | heka -hash` — the password
+  # itself is never stored. user defaults to "admin".
+  # user: admin
+  # password_hash: ${HEKA_PASSWORD_HASH}
 
 # Rotation defaults; can be overridden per provider with the same section.
 rotation:

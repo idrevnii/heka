@@ -22,16 +22,33 @@ The Heka token is the value of `SERVICE_PASSWORD_64_HEKA` shown in Coolify.
 Clients use it as their API key. The CLIProxyAPI key is internal and should
 not be given to clients.
 
-The dashboard has its own login, separate from that token: set `HEKA_USER`
-(defaults to `admin`) and `HEKA_PASSWORD_HASH` in Coolify's environment. The
-hash is bcrypt — generate it once with
+The dashboard has its own login, separate from that token. It is **off until
+you configure one** — heka has no default password and never invents a hash.
+To turn it on, generate a bcrypt hash once:
 
 ```sh
 printf '%s' 'your-password' | docker compose run --rm --no-deps -T heka -hash
 ```
 
-and paste the `$2a$...` line into `HEKA_PASSWORD_HASH`. Leave both unset and
-`/dashboard` stays off.
+and set the `$2a$...` line as `HEKA_PASSWORD_HASH` in Coolify's environment
+(`HEKA_USER` too if `admin` isn't the name you want). Leave it unset and
+`/dashboard` answers `404` with that hint, while the gateway itself runs
+normally.
+
+On an **already-deployed** instance the live config predates these fields,
+and the config editor is behind the very login you're adding — so add them
+to `/data/apps/heka/config/heka.yaml` on the host once:
+
+```yaml
+auth:
+  tokens:
+    - "${HEKA_TOKEN}"
+  password_hash: "${HEKA_PASSWORD_HASH}"
+```
+
+The file watcher picks it up within `dashboard.watch` (10s), so no restart
+is needed — but the container does need `HEKA_PASSWORD_HASH` in its
+environment, which in Coolify means redeploying after setting it.
 
 `deploy/heka.yaml` in the repo is only a **first-boot seed**. The live,
 authoritative config is `/data/apps/heka/config/heka.yaml` on the host,

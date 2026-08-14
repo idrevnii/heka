@@ -173,6 +173,15 @@ providers:
 		t.Fatal("DashboardLogin() = false with user and hash set")
 	}
 
+	// A hash on its own is enough: the account name defaults.
+	only, err := Load(write(t, `auth: { tokens: [ "t" ], password_hash: "`+string(h)+`" }`+provider))
+	if err != nil {
+		t.Fatalf("password_hash without user: %v", err)
+	}
+	if only.Auth.User != DefaultDashboardUser {
+		t.Fatalf("default user = %q, want %q", only.Auth.User, DefaultDashboardUser)
+	}
+
 	if _, err := Load(write(t, `auth: { tokens: [ "t" ], user: admin }`+provider)); err == nil {
 		t.Fatal("user without password_hash accepted")
 	}

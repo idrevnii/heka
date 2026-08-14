@@ -10,8 +10,9 @@ listen: "0.0.0.0:8787"
 auth:
   tokens:
     - "${HEKA_TOKEN}"
-  # Dashboard sign-in. The hash is produced by `heka -hash`; without both
-  # fields /dashboard stays off.
+  # Dashboard sign-in. Both empty — the default — means /dashboard is off;
+  # set HEKA_PASSWORD_HASH (from `heka -hash`) to turn it on, and HEKA_USER
+  # too if "admin" isn't the name you want.
   user: "${HEKA_USER}"
   password_hash: "${HEKA_PASSWORD_HASH}"
 

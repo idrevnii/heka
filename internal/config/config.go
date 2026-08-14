@@ -161,6 +161,10 @@ type Auth struct {
 	PasswordHash string `yaml:"password_hash"`
 }
 
+// DefaultDashboardUser is the account name assumed when a password_hash is
+// configured without a user.
+const DefaultDashboardUser = "admin"
+
 // DashboardLogin reports whether a dashboard login is configured at all.
 func (a Auth) DashboardLogin() bool {
 	return a.User != "" && a.PasswordHash != ""
@@ -625,6 +629,12 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(t) == "" {
 			return fmt.Errorf("auth.tokens[%d] is empty", i)
 		}
+	}
+	// A password with no user next to it means the deployment only bothered
+	// to set the secret — name the account for it instead of refusing to
+	// boot over a missing username.
+	if c.Auth.PasswordHash != "" && c.Auth.User == "" {
+		c.Auth.User = DefaultDashboardUser
 	}
 	if err := c.Auth.validateLogin(); err != nil {
 		return err
