@@ -232,30 +232,9 @@ type Provider struct {
 	Keys     []string  `yaml:"keys"`
 	Rotation *Rotation `yaml:"rotation"`
 	Capture  *Capture  `yaml:"capture"`
-	// CheckModel names the model a manual key check asks for one token
-	// from; empty means the provider offers no check. CheckPath overrides
-	// the endpoint it is posted to (default DefaultCheckPath) — an
-	// Anthropic-dialect provider wants "/v1/messages".
+	// CheckModel names the model a manual key check asks one token from;
+	// empty means the provider offers no check.
 	CheckModel string `yaml:"check_model"`
-	CheckPath  string `yaml:"check_path"`
-}
-
-// DefaultCheckPath is where a key check posts when check_path is unset: the
-// OpenAI-dialect chat completions route.
-const DefaultCheckPath = "/v1/chat/completions"
-
-// CheckFor resolves the model and path a key check for provider name uses;
-// ok is false when that provider has no check_model.
-func (c *Config) CheckFor(name string) (model, path string, ok bool) {
-	p, exists := c.Providers[name]
-	if !exists || p.CheckModel == "" {
-		return "", "", false
-	}
-	path = p.CheckPath
-	if path == "" {
-		path = DefaultCheckPath
-	}
-	return p.CheckModel, path, true
 }
 
 // KeyIn describes where the provider expects its API key: exactly one of
@@ -712,12 +691,6 @@ func (c *Config) validate() error {
 			if strings.TrimSpace(k) == "" {
 				return fmt.Errorf("%s: keys[%d] is empty", where, i)
 			}
-		}
-		switch {
-		case p.CheckPath != "" && p.CheckModel == "":
-			return fmt.Errorf("%s: check_path requires check_model", where)
-		case p.CheckPath != "" && !strings.HasPrefix(p.CheckPath, "/"):
-			return fmt.Errorf("%s: check_path %q must start with /", where, p.CheckPath)
 		}
 		if err := p.Rotation.validate(where + ": rotation"); err != nil {
 			return err

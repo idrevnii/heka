@@ -258,10 +258,6 @@ async function loadRequests() {
 // here or they'd snap shut under the poll.
 const expandedKeys = new Set();
 
-// Last check verdict per "provider#index", for the same reason: the button
-// itself is thrown away by the next poll, so the answer has to outlive it.
-const checkResults = new Map();
-
 function keyTag(provider, k) {
   return provider + "#" + k.index;
 }
@@ -285,12 +281,8 @@ function keyRow(provider, k, canCheck) {
   actions.appendChild(reset);
   if (canCheck) {
     const check = el("button", { class: "link", title: "ask the provider for one token with this key" }, ["check"]);
-    check.addEventListener("click", () => checkKey(provider, k));
+    check.addEventListener("click", () => checkKey(provider, k, check));
     actions.appendChild(check);
-  }
-  const verdict = checkResults.get(keyTag(provider, k));
-  if (verdict) {
-    actions.appendChild(el("span", { class: verdict.cls, title: verdict.title }, [verdict.text]));
   }
 
   return el("tr", {}, [
@@ -344,28 +336,22 @@ async function resetKey(provider, k, button) {
 }
 
 // checkKey spends one real (one-token) upstream request on this key. The
-// server records the verdict in the pool, so the state pill and the error
-// panel update themselves; the badge here is just the immediate answer.
-async function checkKey(provider, k) {
-  const tag = keyTag(provider, k);
-  checkResults.set(tag, { text: "checking…", cls: "detail", title: "" });
-  loadOverview();
-  let res;
+// verdict is recorded in the pool server-side, so the answer shows up in the
+// state pill, the counters and the why? panel — nothing to render here.
+async function checkKey(provider, k, button) {
+  button.disabled = true;
+  button.textContent = "checking…";
   try {
-    res = await apiJSON(
+    await apiJSON(
       "/dashboard/api/status/check?provider=" + encodeURIComponent(provider) + "&key=" + k.index,
       { method: "POST" }
     );
   } catch (err) {
-    checkResults.set(tag, { text: "check failed", cls: "status-err", title: err.message });
-    loadOverview();
+    button.textContent = "failed";
+    button.title = err.message;
+    button.disabled = false;
     return;
   }
-  checkResults.set(tag, {
-    text: res.ok ? "works" : "dead" + (res.status ? " · " + res.status : ""),
-    cls: res.ok ? "status-2xx" : "status-err",
-    title: res.message || "",
-  });
   loadOverview();
 }
 

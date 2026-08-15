@@ -313,13 +313,17 @@ func (h *Handler) outbound(r *http.Request, secret string, buf []byte, replayabl
 	return out, nil
 }
 
+// checkPath is where a key check posts: the OpenAI-dialect chat completions
+// route, which every provider heka fronts either speaks or translates.
+const checkPath = "/v1/chat/completions"
+
 // Check asks the upstream for one token of output using one specific key,
 // and folds the answer into the pool exactly as a proxied request would: a
 // 429 cools the key down, a 401 disables it, a 200 clears both. That last
 // part is the point of it — a key whose upstream limit outlives heka's own
 // cooldown ceiling reads as "active" again long before it really is, and
 // only a real request can tell the difference.
-func (h *Handler) Check(ctx context.Context, idx int, secret, model, path string) (status int, message string, err error) {
+func (h *Handler) Check(ctx context.Context, idx int, secret, model string) (status int, message string, err error) {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 1,
@@ -328,7 +332,7 @@ func (h *Handler) Check(ctx context.Context, idx int, secret, model, path string
 	if err != nil {
 		return 0, "", err
 	}
-	raw := h.Target.Scheme + "://" + h.Target.Host + strings.TrimSuffix(h.Target.EscapedPath(), "/") + path
+	raw := h.Target.Scheme + "://" + h.Target.Host + strings.TrimSuffix(h.Target.EscapedPath(), "/") + checkPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, raw, bytes.NewReader(body))
 	if err != nil {
 		return 0, "", err
@@ -342,7 +346,15 @@ func (h *Handler) Check(ctx context.Context, idx int, secret, model, path string
 	}
 
 	resp, err := h.Transport.RoundTrip(req)
-	h.report(classify(resp, err, h.Params), idx, resp)
+	v := classify(resp, err, h.Params)
+	// classify() calls anything not 429/401/5xx a success, which is right for
+	// a client's request (a 404 means the request was wrong, not the key) but
+	// wrong here, where heka wrote the request: reporting success on it would
+	// clear a live cooldown on the strength of a bad check_model.
+	if v == vOK && resp != nil && resp.StatusCode >= 300 {
+		v = vRetryable
+	}
+	h.report(v, idx, resp)
 	if err != nil {
 		h.Log.Warn("key check failed", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "error", err)
 		return 0, "", err

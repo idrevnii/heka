@@ -327,17 +327,21 @@ func TestInvalidKeyRecordsUpstreamError(t *testing.T) {
 // cooldown had already expired and called it active.
 func TestCheckProbesOneKey(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		if n == 1 {
+		switch n {
+		case 1:
 			io.WriteString(w, `{"choices":[]}`)
-			return
+		case 2:
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":"rate limited"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":"unknown model"}`)
 		}
-		w.Header().Set("Retry-After", "60")
-		w.WriteHeader(http.StatusTooManyRequests)
-		io.WriteString(w, `{"error":"rate limited"}`)
 	})
 	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1, key2)
 
-	status, msg, err := h.Check(context.Background(), 0, key1, "deepseek-v4-flash", "/v1/chat/completions")
+	status, msg, err := h.Check(context.Background(), 0, key1, "deepseek-v4-flash")
 	if err != nil || status != http.StatusOK || msg != `{"choices":[]}` {
 		t.Fatalf("check = (%d, %q, %v)", status, msg, err)
 	}
@@ -361,7 +365,7 @@ func TestCheckProbesOneKey(t *testing.T) {
 		t.Fatalf("key 0 after a passing check = %+v", st)
 	}
 
-	if status, _, err = h.Check(context.Background(), 1, key2, "deepseek-v4-flash", "/v1/chat/completions"); err != nil {
+	if status, _, err = h.Check(context.Background(), 1, key2, "deepseek-v4-flash"); err != nil {
 		t.Fatal(err)
 	}
 	if status != http.StatusTooManyRequests {
@@ -370,6 +374,15 @@ func TestCheckProbesOneKey(t *testing.T) {
 	st := pool.Snapshot()[1]
 	if st.State != "cooldown" || st.LastError == nil || st.LastError.Reason != "rate_limited" {
 		t.Fatalf("key 1 after a failing check = %+v, last error %+v", st, st.LastError)
+	}
+
+	// A 404 is heka's own fault (wrong check_model), not evidence the key
+	// works — counting it as a success would clear a real cooldown.
+	if _, _, err := h.Check(context.Background(), 0, key1, "no-such-model"); err != nil {
+		t.Fatal(err)
+	}
+	if st := pool.Snapshot()[0]; st.Successes != 1 || st.Failures != 1 {
+		t.Fatalf("key 0 after a 404 check = %+v", st)
 	}
 }
 

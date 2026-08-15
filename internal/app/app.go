@@ -298,10 +298,7 @@ func (a *App) StatusSnapshot() map[string]any {
 	// Which providers the dashboard may offer a per-key "check" button for.
 	check := map[string]bool{}
 	for name := range a.providers {
-		if a.cfg == nil {
-			break
-		}
-		if _, _, ok := a.cfg.CheckFor(name); ok {
+		if a.checkable(name) != nil {
 			check[name] = true
 		}
 	}
@@ -354,6 +351,19 @@ func (a *App) ResetStatusKey(provider string, key int) error {
 	return nil
 }
 
+// checkable returns the applied config of a provider that has a key check
+// configured, or nil. Callers must hold a.mu.
+func (a *App) checkable(name string) *config.Provider {
+	if a.cfg == nil {
+		return nil
+	}
+	p := a.cfg.Providers[name]
+	if p == nil || p.CheckModel == "" {
+		return nil
+	}
+	return p
+}
+
 // CheckResult is the outcome of one manual key check. A transport failure
 // (no HTTP response at all) is reported as OK=false with Status 0 and the
 // error text as Message — the check itself succeeded in telling us the key
@@ -364,21 +374,16 @@ type CheckResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// checkTimeout caps one key check. A one-token completion is fast; anything
-// slower than this is a hung upstream, not an answer worth waiting for.
-const checkTimeout = 30 * time.Second
-
 // CheckKey sends a one-token request upstream with a single key of one
 // provider and records the verdict in the pool. Requires check_model on the
 // provider.
 func (a *App) CheckKey(ctx context.Context, provider string, idx int) (CheckResult, error) {
 	a.mu.Lock()
 	pi := a.providers[provider]
-	var model, path, secret string
-	configured := false
-	if a.cfg != nil {
-		model, path, configured = a.cfg.CheckFor(provider)
-		if p := a.cfg.Providers[provider]; p != nil && idx >= 0 && idx < len(p.Keys) {
+	var model, secret string
+	if p := a.checkable(provider); p != nil {
+		model = p.CheckModel
+		if idx >= 0 && idx < len(p.Keys) {
 			secret = p.Keys[idx]
 		}
 	}
@@ -387,15 +392,17 @@ func (a *App) CheckKey(ctx context.Context, provider string, idx int) (CheckResu
 	switch {
 	case pi == nil:
 		return CheckResult{}, fmt.Errorf("unknown provider %q", provider)
-	case !configured:
+	case model == "":
 		return CheckResult{}, fmt.Errorf("provider %q has no check_model configured", provider)
 	case secret == "":
 		return CheckResult{}, fmt.Errorf("provider %q has no key %d", provider, idx)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	// A one-token completion is fast; slower than this is a hung upstream,
+	// not an answer worth waiting for.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	status, msg, err := pi.handler.Check(ctx, idx, secret, model, path)
+	status, msg, err := pi.handler.Check(ctx, idx, secret, model)
 	if err != nil {
 		return CheckResult{Message: err.Error()}, nil
 	}
