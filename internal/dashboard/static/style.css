@@ -1,24 +1,49 @@
+/* Radius scale, applied everywhere: 12px containers, 6px controls/inputs,
+   999px pills. One accent (--accent) for every interactive affordance; the
+   status colors are semantic only (never decorative). */
 :root {
   color-scheme: dark light;
-  --bg: #0f1115;
-  --panel: #171a21;
-  --border: #2a2f3a;
-  --text: #e6e8ec;
-  --muted: #8a92a3;
-  --accent: #5b9dff;
-  --ok: #4caf7d;
-  --warn: #e0a94b;
-  --err: #e0616b;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --bg: #0e1013;
+  --panel: #16191e;
+  --panel-2: #1b1f25;
+  --border: #262b33;
+  --border-soft: #1e222a;
+  --text: #e7e9ee;
+  --muted: #8b93a1;
+  --faint: #646c7a;
+  --accent: #6f9df8;
+  --accent-soft: rgba(111, 157, 248, 0.14);
+  /* Filled buttons carry white text, so they use a darker shade of the same
+     accent to stay above WCAG AA (4.5:1); --accent itself is a hairline and
+     text color on dark panels. */
+  --accent-strong: #3b6fd4;
+  --ok: #57c08a;
+  --warn: #dda54c;
+  --err: #e2626e;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-family: var(--sans);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f7f9;
+    --bg: #f4f5f7;
     --panel: #ffffff;
-    --border: #dde1e8;
-    --text: #1b1f27;
-    --muted: #5b6472;
+    --panel-2: #f8f9fb;
+    --border: #e0e4ea;
+    --border-soft: #ebeef2;
+    --text: #171a1f;
+    --muted: #5d6674;
+    --faint: #7b8494;
+    --accent: #2f6ee0;
+    --accent-soft: rgba(47, 110, 224, 0.09);
+    --accent-strong: #2b62c9;
+    --ok: #1f8a5c;
+    --warn: #9a6510;
+    --err: #c8323f;
+    --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 12px 28px -16px rgba(16, 24, 40, 0.24);
   }
 }
 
@@ -29,58 +54,102 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --- header ---------------------------------------------------------------- */
 header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 10px 20px;
+  gap: 20px;
+  height: 56px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 header h1 {
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 650;
   margin: 0;
-  letter-spacing: 0.02em;
+  letter-spacing: -0.01em;
+}
+
+nav#tabs {
+  display: flex;
+  gap: 2px;
 }
 
 nav#tabs button {
   background: none;
   border: none;
   color: var(--muted);
-  padding: 8px 12px;
+  padding: 6px 11px;
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 14px;
-  border-bottom: 2px solid transparent;
+  font: inherit;
+  font-size: 13.5px;
+  transition: color .15s ease, background .15s ease;
 }
+
+nav#tabs button:hover { color: var(--text); background: var(--panel-2); }
 
 nav#tabs button.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 550;
 }
 
-#auth-status {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 12px;
-}
+#auth-status { margin-left: auto; }
 
-#logout {
-  background: none;
+/* --- buttons --------------------------------------------------------------- */
+button.ghost,
+#logout,
+.toolbar button,
+td.key-actions button.link {
+  background: var(--panel);
   border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 4px 10px;
+  color: var(--text);
   border-radius: 6px;
   cursor: pointer;
-  font-size: 12px;
+  font: inherit;
+  transition: border-color .15s ease, background .15s ease, transform .1s ease;
 }
+
+#logout, td.key-actions button.link { color: var(--muted); font-size: 12.5px; }
+#logout { padding: 5px 11px; }
+.toolbar button { padding: 6px 12px; }
+
+#logout:hover,
+.toolbar button:hover,
+td.key-actions button.link:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+#logout:active,
+.toolbar button:active,
+td.key-actions button.link:active { transform: translateY(1px); }
+
+td.key-actions button.link:disabled { opacity: .45; cursor: default; transform: none; }
 
 #logout.hidden { display: none; }
 
+/* --- layout ---------------------------------------------------------------- */
 main {
-  padding: 20px;
+  padding: 24px 20px 64px;
   max-width: 1200px;
   margin: 0 auto;
 }
@@ -88,36 +157,59 @@ main {
 .tab { display: none; }
 .tab.active { display: block; }
 
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 28px 0 10px;
+  letter-spacing: 0;
+}
+
+/* --- stat tiles ------------------------------------------------------------ */
+/* One panel split by hairlines rather than five floating cards: the numbers
+   are one reading, not five unrelated objects. */
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 12px;
-  margin-bottom: 24px;
-}
-
-.tile {
-  background: var(--panel);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--border);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
-.tile .value { font-size: 22px; font-weight: 600; }
-.tile .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.tile { background: var(--panel); padding: 14px 16px; }
 
+.tile .value {
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile .label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* --- tables ---------------------------------------------------------------- */
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
 th, td {
   text-align: left;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
@@ -125,51 +217,97 @@ th, td {
   max-width: 320px;
 }
 
-th { color: var(--muted); font-weight: 500; font-size: 12px; }
+/* Hairline between rows only: no top+bottom border on every row. */
+tbody tr + tr td, tbody tr:first-child th + td { border-top: 1px solid var(--border-soft); }
+thead th { border-bottom: 1px solid var(--border); }
+
+/* Not sticky: the table's own overflow clipping (and the .requests-list
+   scroll box) would pin it to that box, not the viewport. */
+th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 550;
+  font-size: 11.5px;
+  z-index: 1;
+}
+
+td { font-size: 13px; }
 
 tbody tr { cursor: pointer; }
-tbody tr:hover { background: rgba(91, 157, 255, 0.08); }
+tbody tr:hover td { background: var(--accent-soft); }
+tr.key-error:hover td { background: none; }
 
-td.cache { color: var(--muted); }
+td.cache { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+/* Fixed column order (see index.html): status, attempts, ms are numbers, so
+   they get mono + right alignment to stay scannable down the column. */
+#requests-table td:nth-child(5),
+#requests-table td:nth-child(6),
+#requests-table td:nth-child(7) { font-family: var(--mono); font-size: 12px; }
+#requests-table th:nth-child(6), #requests-table td:nth-child(6),
+#requests-table th:nth-child(7), #requests-table td:nth-child(7) { text-align: right; }
+#requests-table td:first-child { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+/* Key rows: the key itself is an identifier, and the counters are numbers. */
+.proxy-block td:first-child { width: 34%; font-family: var(--mono); font-size: 12px; }
 
 .status-2xx { color: var(--ok); }
 .status-3xx { color: var(--accent); }
 .status-4xx { color: var(--warn); }
 .status-5xx, .status-err { color: var(--err); }
-
-.pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  border: 1px solid var(--border);
+td.status-2xx, td.status-3xx, td.status-4xx, td.status-5xx, td.status-err {
+  font-family: var(--mono);
+  font-weight: 550;
 }
 
-.pill.active { color: var(--ok); border-color: var(--ok); }
-.pill.cooldown { color: var(--warn); border-color: var(--warn); }
-.pill.disabled, .pill.down { color: var(--err); border-color: var(--err); }
-.pill.healthy { color: var(--ok); border-color: var(--ok); }
+/* --- pills ----------------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--panel-2);
+}
 
+.pill.active, .pill.healthy {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.pill.cooldown {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.pill.disabled, .pill.down {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+/* --- toolbar --------------------------------------------------------------- */
 .toolbar {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
   color: var(--muted);
   font-size: 13px;
 }
 
-.toolbar button {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 6px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-}
+.toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.toolbar input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 
-.toolbar button:hover { border-color: var(--accent); }
+#config-path { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+#config-status { font-size: 12.5px; }
 
+/* --- requests -------------------------------------------------------------- */
 .requests-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
@@ -196,64 +334,70 @@ td.cache { color: var(--muted); }
 .detail {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 12px;
+  padding: 14px;
+  margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 70vh;
   overflow: auto;
+  font-family: var(--mono);
   font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  box-shadow: var(--shadow);
 }
 
+/* --- config editor --------------------------------------------------------- */
 #config-editor-container {
   width: 100%;
   height: 70vh;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
-#config-editor-container .cm-editor {
-  height: 100%;
-}
+#config-editor-container .cm-editor { height: 100%; }
 
 #config-editor-container .cm-line-error {
-  background: rgba(224, 97, 107, 0.15);
+  background: color-mix(in srgb, var(--err) 15%, transparent);
   outline: 1px solid var(--err);
 }
 
-/* Per-key controls: quiet enough not to compete with the state pill, but
-   always visible — an operator shouldn't have to hunt for the reset. */
-td.key-actions {
-  text-align: right;
-  white-space: nowrap;
-}
-
-td.key-actions button.link {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 2px 8px;
-  margin-left: 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-td.key-actions button.link:hover { color: var(--text); border-color: var(--accent); }
-td.key-actions button.link:disabled { opacity: 0.5; cursor: default; }
+/* --- per-key controls ------------------------------------------------------ */
+/* Quiet enough not to compete with the state pill, but always visible: an
+   operator shouldn't have to hunt for the reset. */
+td.key-actions { text-align: right; white-space: nowrap; }
+td.key-actions button.link { padding: 3px 9px; margin-left: 6px; }
 
 tr.key-error.hidden { display: none; }
-tr.key-error td { max-width: none; white-space: normal; padding: 0 10px 10px; }
-tr.key-error .detail { margin: 0; max-height: 40vh; }
+tr.key-error td { max-width: none; white-space: normal; padding: 0 12px 12px; border-top: none; }
+tr.key-error .detail { max-height: 40vh; box-shadow: none; background: var(--panel-2); }
 
-.proxy-block { margin-bottom: 14px; }
-.proxy-block h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+.proxy-block { margin-bottom: 18px; }
 
+.proxy-block h3 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  font-family: var(--mono);
+  margin: 0 0 8px;
+}
+
+.proxy-block .pill { margin-right: 4px; }
+
+/* --- sign in --------------------------------------------------------------- */
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.6);
+  z-index: 50;
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 20px;
 }
 
 .modal.hidden { display: none; }
@@ -261,35 +405,56 @@ tr.key-error .detail { margin: 0; max-height: 40vh; }
 .modal-box {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 20px;
+  border-radius: 12px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-width: 280px;
+  gap: 14px;
+  width: 100%;
+  max-width: 320px;
+  box-shadow: var(--shadow);
 }
+
+.modal-box h2 { margin: 0; font-size: 15px; color: var(--text); }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+
+.field label { font-size: 12.5px; color: var(--muted); }
 
 .modal-box input {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 8px;
+  padding: 9px 10px;
   border-radius: 6px;
+  font: inherit;
+  transition: border-color .15s ease;
 }
 
-.modal-box p { margin: 0; }
+.modal-box input:focus { border-color: var(--accent); }
 
 .modal-box .error {
   color: var(--err);
-  font-size: 12px;
+  font-size: 12.5px;
   min-height: 1em;
+  margin: 0;
 }
 
-.modal-box button {
-  background: var(--accent);
-  border: none;
+.modal-box button[type="submit"] {
+  background: var(--accent-strong);
+  border: 1px solid var(--accent-strong);
   color: #fff;
-  padding: 8px;
+  padding: 9px;
   border-radius: 6px;
   cursor: pointer;
+  font: inherit;
+  font-weight: 550;
+  transition: filter .15s ease, transform .1s ease;
+}
+
+.modal-box button[type="submit"]:hover { filter: brightness(1.08); }
+.modal-box button[type="submit"]:active { transform: translateY(1px); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
 }

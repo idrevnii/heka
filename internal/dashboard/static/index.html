@@ -61,11 +61,17 @@
 
 <div id="login" class="modal hidden">
   <form id="login-form" class="modal-box">
-    <p>Sign in</p>
-    <input id="login-user" type="text" placeholder="user" autocomplete="username" autofocus>
-    <input id="login-password" type="password" placeholder="password" autocomplete="current-password">
+    <h2>Sign in</h2>
+    <div class="field">
+      <label for="login-user">User</label>
+      <input id="login-user" type="text" autocomplete="username" autofocus>
+    </div>
+    <div class="field">
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password">
+    </div>
     <button type="submit">Sign in</button>
-    <p id="login-error" class="error"></p>
+    <p id="login-error" class="error" role="alert"></p>
   </form>
 </div>
 
