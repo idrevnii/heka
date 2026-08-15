@@ -295,6 +295,19 @@ func (a *App) StatusSnapshot() map[string]any {
 		providers[name] = pi.pool.Snapshot()
 	}
 	body := map[string]any{"providers": providers}
+	// Which providers the dashboard may offer a per-key "check" button for.
+	check := map[string]bool{}
+	for name := range a.providers {
+		if a.cfg == nil {
+			break
+		}
+		if _, _, ok := a.cfg.CheckFor(name); ok {
+			check[name] = true
+		}
+	}
+	if len(check) > 0 {
+		body["check"] = check
+	}
 	if len(a.sidecars) > 0 {
 		sidecars := map[string]string{}
 		for name, si := range a.sidecars {
@@ -339,6 +352,54 @@ func (a *App) ResetStatusKey(provider string, key int) error {
 		return fmt.Errorf("provider %q has no key %d", provider, key)
 	}
 	return nil
+}
+
+// CheckResult is the outcome of one manual key check. A transport failure
+// (no HTTP response at all) is reported as OK=false with Status 0 and the
+// error text as Message — the check itself succeeded in telling us the key
+// didn't work right now.
+type CheckResult struct {
+	OK      bool   `json:"ok"`
+	Status  int    `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// checkTimeout caps one key check. A one-token completion is fast; anything
+// slower than this is a hung upstream, not an answer worth waiting for.
+const checkTimeout = 30 * time.Second
+
+// CheckKey sends a one-token request upstream with a single key of one
+// provider and records the verdict in the pool. Requires check_model on the
+// provider.
+func (a *App) CheckKey(ctx context.Context, provider string, idx int) (CheckResult, error) {
+	a.mu.Lock()
+	pi := a.providers[provider]
+	var model, path, secret string
+	configured := false
+	if a.cfg != nil {
+		model, path, configured = a.cfg.CheckFor(provider)
+		if p := a.cfg.Providers[provider]; p != nil && idx >= 0 && idx < len(p.Keys) {
+			secret = p.Keys[idx]
+		}
+	}
+	a.mu.Unlock()
+
+	switch {
+	case pi == nil:
+		return CheckResult{}, fmt.Errorf("unknown provider %q", provider)
+	case !configured:
+		return CheckResult{}, fmt.Errorf("provider %q has no check_model configured", provider)
+	case secret == "":
+		return CheckResult{}, fmt.Errorf("provider %q has no key %d", provider, idx)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	status, msg, err := pi.handler.Check(ctx, idx, secret, model, path)
+	if err != nil {
+		return CheckResult{Message: err.Error()}, nil
+	}
+	return CheckResult{OK: status >= 200 && status < 300, Status: status, Message: msg}, nil
 }
 
 // Shutdown stops the root context (tearing down every sidecar supervisor,

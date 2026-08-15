@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ type fakeBackend struct {
 	applied   string
 	statusMap map[string]any
 	resetKeys []string
+	checked   []string
 }
 
 func (f *fakeBackend) ReadConfig() ([]byte, string, string, error) {
@@ -75,6 +77,14 @@ func (f *fakeBackend) ResetStatusKey(provider string, key int) error {
 	}
 	f.resetKeys = append(f.resetKeys, provider)
 	return nil
+}
+
+func (f *fakeBackend) CheckKey(ctx context.Context, provider string, key int) (app.CheckResult, error) {
+	if provider == "missing" {
+		return app.CheckResult{}, errors.New("unknown provider")
+	}
+	f.checked = append(f.checked, provider)
+	return app.CheckResult{OK: true, Status: 200, Message: "{}"}, nil
 }
 
 func newTestHandler() (*Handler, *fakeBackend, *history.Store) {

@@ -321,6 +321,58 @@ func TestInvalidKeyRecordsUpstreamError(t *testing.T) {
 	}
 }
 
+// Check is the manual "is this key actually alive?" probe: it must reach the
+// upstream with that one key, ask for a single token, and — the whole reason
+// it exists — bench a key the provider rejects even though heka's own
+// cooldown had already expired and called it active.
+func TestCheckProbesOneKey(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if n == 1 {
+			io.WriteString(w, `{"choices":[]}`)
+			return
+		}
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"rate limited"}`)
+	})
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1, key2)
+
+	status, msg, err := h.Check(context.Background(), 0, key1, "deepseek-v4-flash", "/v1/chat/completions")
+	if err != nil || status != http.StatusOK || msg != `{"choices":[]}` {
+		t.Fatalf("check = (%d, %q, %v)", status, msg, err)
+	}
+	if got := up.requests[0].URL.Path; got != "/v1/chat/completions" {
+		t.Fatalf("path = %q", got)
+	}
+	if got := up.requests[0].Header.Get("Authorization"); got != "Bearer "+key1 {
+		t.Fatalf("authorization = %q", got)
+	}
+	var sent struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+	}
+	if err := json.Unmarshal([]byte(up.bodies[0]), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Model != "deepseek-v4-flash" || sent.MaxTokens != 1 {
+		t.Fatalf("sent body = %s", up.bodies[0])
+	}
+	if st := pool.Snapshot()[0]; st.State != "active" || st.Successes != 1 {
+		t.Fatalf("key 0 after a passing check = %+v", st)
+	}
+
+	if status, _, err = h.Check(context.Background(), 1, key2, "deepseek-v4-flash", "/v1/chat/completions"); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", status)
+	}
+	st := pool.Snapshot()[1]
+	if st.State != "cooldown" || st.LastError == nil || st.LastError.Reason != "rate_limited" {
+		t.Fatalf("key 1 after a failing check = %+v, last error %+v", st, st.LastError)
+	}
+}
+
 // A rate limit is a temporary state, but why it happened is still worth
 // keeping — quota exhausted and per-minute throttling look identical
 // otherwise.

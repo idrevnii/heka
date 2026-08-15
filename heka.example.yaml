@@ -36,6 +36,8 @@ providers:
     base_url: https://api.openai.com
     key_in: { header: Authorization, prefix: "Bearer " }
     keys: [ "${OPENAI_KEY_1}" ]
+    # check_model: gpt-4o-mini    # enables the dashboard's per-key "check"
+    # check_path: /v1/messages    #   button; default path is /v1/chat/completions
 
   google:
     base_url: https://generativelanguage.googleapis.com

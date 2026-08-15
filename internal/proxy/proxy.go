@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -310,6 +311,48 @@ func (h *Handler) outbound(r *http.Request, secret string, buf []byte, replayabl
 		}
 	}
 	return out, nil
+}
+
+// Check asks the upstream for one token of output using one specific key,
+// and folds the answer into the pool exactly as a proxied request would: a
+// 429 cools the key down, a 401 disables it, a 200 clears both. That last
+// part is the point of it — a key whose upstream limit outlives heka's own
+// cooldown ceiling reads as "active" again long before it really is, and
+// only a real request can tell the difference.
+func (h *Handler) Check(ctx context.Context, idx int, secret, model, path string) (status int, message string, err error) {
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	raw := h.Target.Scheme + "://" + h.Target.Host + strings.TrimSuffix(h.Target.EscapedPath(), "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, raw, bytes.NewReader(body))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	switch {
+	case h.KeyIn.Header != "":
+		req.Header.Set(h.KeyIn.Header, h.KeyIn.Prefix+secret)
+	case h.KeyIn.Query != "":
+		req.URL.RawQuery = replaceQueryParam(req.URL.RawQuery, h.KeyIn.Query, secret)
+	}
+
+	resp, err := h.Transport.RoundTrip(req)
+	h.report(classify(resp, err, h.Params), idx, resp)
+	if err != nil {
+		h.Log.Warn("key check failed", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "error", err)
+		return 0, "", err
+	}
+	defer drain(resp.Body)
+	// report() already peeked (and spliced back) any error body; reading the
+	// head here gets the same bytes, and on success the whole short answer.
+	head, _ := io.ReadAll(io.LimitReader(resp.Body, errPeekMax))
+	h.Log.Info("key check", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "status", resp.StatusCode)
+	return resp.StatusCode, errorText(head, resp.Header.Get("Content-Encoding")), nil
 }
 
 // replaceQueryParam removes every existing value for name and appends the

@@ -51,6 +51,10 @@ providers:
       - "${OPENCODE_GO_KEY_10}"
     rotation:
       max_retries: 9
+    # Dashboard "check" button: one token from this model with one key, to
+    # find out whether the provider really accepts it. The keys below are the
+    # same ones opencode-go-anthropic uses, so checking them here covers both.
+    check_model: deepseek-v4-flash
 
   opencode-go-anthropic:
     base_url: https://opencode.ai/zen/go

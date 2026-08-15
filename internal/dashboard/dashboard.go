@@ -7,6 +7,7 @@ package dashboard
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -39,6 +40,7 @@ type Backend interface {
 	StatusSnapshot() map[string]any
 	ResetStatus(provider string) ([]string, error)
 	ResetStatusKey(provider string, key int) error
+	CheckKey(ctx context.Context, provider string, key int) (app.CheckResult, error)
 }
 
 type Handler struct {
@@ -71,6 +73,7 @@ func New(backend Backend, hist *history.Store, log *slog.Logger) *Handler {
 	mux.HandleFunc("GET /dashboard/api/errors", h.handleErrors)
 	mux.HandleFunc("GET /dashboard/api/status", h.handleStatus)
 	mux.HandleFunc("POST /dashboard/api/status/reset", h.handleStatusReset)
+	mux.HandleFunc("POST /dashboard/api/status/check", h.handleStatusCheck)
 	mux.HandleFunc("GET /dashboard/api/config", h.handleConfigGet)
 	mux.HandleFunc("PUT /dashboard/api/config", h.handleConfigPut)
 	mux.HandleFunc("POST /dashboard/api/config/validate", h.handleConfigValidate)
@@ -219,6 +222,25 @@ func (h *Handler) handleStatusReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxy.WriteJSON(w, http.StatusOK, map[string]any{"reset": reset})
+}
+
+// handleStatusCheck probes one key of one provider with a real (one-token)
+// request. Unlike reset, which only trusts the operator, this asks the
+// upstream — the only source that knows whether a key benched a week ago is
+// actually usable again.
+func (h *Handler) handleStatusCheck(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	idx, err := strconv.Atoi(q.Get("key"))
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: invalid key index")
+		return
+	}
+	res, err := h.backend.CheckKey(r.Context(), q.Get("provider"), idx)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: "+err.Error())
+		return
+	}
+	proxy.WriteJSON(w, http.StatusOK, res)
 }
 
 func (h *Handler) handleConfigGet(w http.ResponseWriter, r *http.Request) {
