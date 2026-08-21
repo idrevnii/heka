@@ -58,6 +58,11 @@ providers:
     key_in: { header: x-api-key }
     keys: [ "${EXA_KEY_1}" ]
 
+  firecrawl:
+    base_url: https://api.firecrawl.dev
+    key_in: { header: Authorization, prefix: "Bearer " }
+    keys: [ "${FIRECRAWL_KEY_1}", "${FIRECRAWL_KEY_2}" ]
+
 # OAuth subscriptions exposed as API via CLIProxyAPI.
 # sidecar:
 #   cliproxy:

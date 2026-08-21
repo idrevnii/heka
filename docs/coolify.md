@@ -91,6 +91,24 @@ bind mount.
 
 ### Grok
 
+One-shot login containers have no compose `configs:` injection, so first
+create a minimal config for them on the server (once):
+
+```sh
+ssh apps "sudo tee /data/apps/heka/cliproxy-login.yaml >/dev/null" <<'EOF'
+host: "127.0.0.1"
+port: 8318
+auth-dir: "/root/.cli-proxy-api"
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+debug: false
+request-log: false
+logging-to-file: false
+EOF
+```
+
 Open an SSH tunnel from the workstation and keep it running:
 
 ```sh
@@ -103,6 +121,7 @@ In another terminal, start the login flow on the server:
 ssh -t apps \
   "sudo docker run --rm -it --network host \
   -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
+  -v /data/apps/heka/cliproxy-login.yaml:/CLIProxyAPI/config.yaml \
   eceasy/cli-proxy-api:v7.2.100 \
   ./CLIProxyAPI --xai-login --no-browser"
 ```
@@ -118,12 +137,13 @@ Use callback port `1455`:
 ssh -L 1455:127.0.0.1:1455 apps
 ```
 
-Then run:
+Then run (same `cliproxy-login.yaml` config as above):
 
 ```sh
 ssh -t apps \
   "sudo docker run --rm -it --network host \
   -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
+  -v /data/apps/heka/cliproxy-login.yaml:/CLIProxyAPI/config.yaml \
   eceasy/cli-proxy-api:v7.2.100 \
   ./CLIProxyAPI --codex-login --no-browser"
 ```
