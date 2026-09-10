@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"log/slog"
+	"maps"
 )
 
 // LogHandler wraps an existing slog.Handler: every record is forwarded to it
@@ -10,10 +11,10 @@ import (
 // Store's event ring. No existing log.Warn/log.Error call site needs to
 // change for its output to show up in the dashboard.
 type LogHandler struct {
-	next   slog.Handler
-	store  *Store
-	attrs  []slog.Attr
-	groups []string
+	next  slog.Handler
+	store *Store
+	attrs map[string]any
+	group string
 }
 
 // NewLogHandler wraps next, capturing Warn/Error records into s.
@@ -29,9 +30,9 @@ func (h *LogHandler) Handle(ctx context.Context, r slog.Record) error {
 	err := h.next.Handle(ctx, r)
 	if r.Level >= slog.LevelWarn {
 		attrs := map[string]any{}
-		flattenAttrs(attrs, h.groups, h.attrs)
+		maps.Copy(attrs, h.attrs)
 		r.Attrs(func(a slog.Attr) bool {
-			addAttr(attrs, h.groups, a)
+			addAttr(attrs, h.group, a)
 			return true
 		})
 		h.store.AddEvent(Event{
@@ -46,37 +47,39 @@ func (h *LogHandler) Handle(ctx context.Context, r slog.Record) error {
 
 func (h *LogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	next := h.next.WithAttrs(attrs)
-	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
-	merged = append(merged, h.attrs...)
-	merged = append(merged, attrs...)
-	return &LogHandler{next: next, store: h.store, attrs: merged, groups: h.groups}
+	merged := map[string]any{}
+	maps.Copy(merged, h.attrs)
+	for _, a := range attrs {
+		addAttr(merged, h.group, a)
+	}
+	return &LogHandler{next: next, store: h.store, attrs: merged, group: h.group}
 }
 
 func (h *LogHandler) WithGroup(name string) slog.Handler {
-	next := h.next.WithGroup(name)
-	groups := make([]string, 0, len(h.groups)+1)
-	groups = append(groups, h.groups...)
-	groups = append(groups, name)
-	return &LogHandler{next: next, store: h.store, attrs: h.attrs, groups: groups}
-}
-
-func flattenAttrs(dst map[string]any, groups []string, attrs []slog.Attr) {
-	for _, a := range attrs {
-		addAttr(dst, groups, a)
+	if name == "" {
+		return h
 	}
+	next := h.next.WithGroup(name)
+	return &LogHandler{next: next, store: h.store, attrs: h.attrs, group: h.group + name + "."}
 }
 
-func addAttr(dst map[string]any, groups []string, a slog.Attr) {
+func addAttr(dst map[string]any, group string, a slog.Attr) {
 	a.Value = a.Value.Resolve()
-	key := a.Key
-	for i := len(groups) - 1; i >= 0; i-- {
-		key = groups[i] + "." + key
+	if a.Equal(slog.Attr{}) {
+		return
 	}
 	if a.Value.Kind() == slog.KindGroup {
+		if a.Key != "" {
+			group += a.Key + "."
+		}
 		for _, sub := range a.Value.Group() {
-			addAttr(dst, append(groups, a.Key), sub)
+			addAttr(dst, group, sub)
 		}
 		return
 	}
-	dst[key] = a.Value.Any()
+	value := a.Value.Any()
+	if err, ok := value.(error); ok {
+		value = err.Error()
+	}
+	dst[group+a.Key] = value
 }

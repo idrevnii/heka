@@ -2,6 +2,7 @@ package keypool
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,6 +95,15 @@ func TestCooldownCap(t *testing.T) {
 	}
 }
 
+func TestExponentialCooldownCannotOverflow(t *testing.T) {
+	const ceiling = time.Duration(1<<63 - 1)
+	p := New(Config{CooldownBase: ceiling/2 + 1, CooldownMax: ceiling}, []string{"key"})
+	p.ReportRateLimited(0, 0, false, ErrorDetail{})
+	if got := p.ReportRateLimited(0, 0, false, ErrorDetail{}); got != ceiling {
+		t.Fatalf("cooldown overflowed: %v", got)
+	}
+}
+
 func TestRetryAfterWins(t *testing.T) {
 	p, _ := testPool("aaaaaaaaaaaaaaaa")
 	if d := p.ReportRateLimited(0, 7*time.Second, true, ErrorDetail{}); d != 7*time.Second {
@@ -125,6 +135,42 @@ func TestDisabledAndReset(t *testing.T) {
 	p.Reset()
 	if _, _, ok := p.Acquire(nil); !ok {
 		t.Fatal("Acquire failed after Reset")
+	}
+}
+
+func TestPermanentBlocksOverrideAllSelectionAndResetPaths(t *testing.T) {
+	var blocked sync.Map
+	p := New(Config{CooldownBase: time.Minute, CooldownMax: time.Hour, Blocked: &blocked}, []string{"a", "b", "a"})
+	blocked.Store(Fingerprint("a"), true)
+	p.Reset()
+	p.ResetKey(0)
+	p.ReportSuccess(0)
+	p.ReportInvalid(0, ErrorDetail{})
+	p.ReportRateLimited(0, time.Second, true, ErrorDetail{})
+	for _, cooling := range []bool{false, true} {
+		if cooling {
+			p.ReportRateLimited(1, time.Hour, true, ErrorDetail{})
+		}
+		for range 10 {
+			if idx, _, ok := p.Acquire(nil); !ok || idx != 1 {
+				t.Fatalf("round robin (cooling=%v): idx=%d ok=%v", cooling, idx, ok)
+			}
+			if idx, _, ok := p.AcquireFor(42, nil); !ok || idx != 1 {
+				t.Fatalf("affinity (cooling=%v): idx=%d ok=%v", cooling, idx, ok)
+			}
+		}
+	}
+	for _, idx := range []int{0, 2} {
+		if p.Snapshot()[idx].State != "blocked" {
+			t.Fatal("duplicate secret escaped the block")
+		}
+	}
+	blocked.Store(Fingerprint("b"), true)
+	if _, _, ok := p.Acquire(nil); ok {
+		t.Fatal("round robin selected a permanently blocked key")
+	}
+	if _, _, ok := p.AcquireFor(42, nil); ok {
+		t.Fatal("affinity selected a permanently blocked key")
 	}
 }
 

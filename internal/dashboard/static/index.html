@@ -3,14 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>heka</title>
+<title>Overview · heka</title>
+<meta name="description" content="Your AI gateway: provider health, API keys, requests and configuration.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>heka</h1>
-  <nav id="tabs">
-    <button data-tab="overview" class="active">Overview</button>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="app-header">
+  <a class="brand" href="./" aria-label="heka home"><span class="brand-mark" aria-hidden="true">h</span>heka<span class="brand-caption">AI gateway</span></a>
+  <nav id="tabs" aria-label="Main navigation">
+    <button data-tab="overview" class="active" aria-current="page">Overview</button>
     <button data-tab="requests">Requests</button>
     <button data-tab="config">Config</button>
   </nav>
@@ -19,61 +22,92 @@
   </div>
 </header>
 
-<main>
+<main id="main" tabindex="-1">
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">GATEWAY CONSOLE</p>
+      <h1 id="page-title">Overview</h1>
+      <p id="page-description">Your providers, keys and traffic at a glance.</p>
+    </div>
+    <div class="refresh-control">
+      <label><input type="checkbox" id="auto-refresh" checked> Live updates</label>
+      <span id="refresh-status">Connecting…</span>
+    </div>
+  </div>
+  <div id="notice" class="notice hidden" role="status"><span></span><button id="notice-dismiss" type="button" aria-label="Dismiss notification">×</button></div>
 
 <section id="tab-overview" class="tab active">
-  <div id="stat-tiles" class="tiles"></div>
-  <h2>Providers &amp; sidecars</h2>
+  <div id="stat-tiles" class="tiles" role="group" aria-label="Traffic statistics"><div class="tile loading">Loading gateway statistics…</div></div>
+  <div class="section-heading"><h2>Providers &amp; keys</h2><span id="provider-count" class="section-meta"></span></div>
   <div id="proxies"></div>
-  <h2>Recent errors</h2>
+  <div class="section-heading"><h2>Recent errors</h2><span class="section-meta">Latest gateway events</span></div>
   <div id="errors"></div>
 </section>
 
 <section id="tab-requests" class="tab">
   <div class="toolbar">
-    <label><input type="checkbox" id="only-errors"> errors only</label>
-    <label><input type="checkbox" id="auto-refresh" checked> auto-refresh</label>
+    <label><input type="checkbox" id="only-errors"> Errors only</label>
+    <span id="request-count" class="section-meta"></span>
   </div>
   <div class="requests-layout">
-    <div class="requests-list">
-      <table id="requests-table">
+    <div class="requests-list" tabindex="0" role="region" aria-label="Request table">
+      <table id="requests-table" aria-label="Recent requests">
         <thead>
-          <tr><th>time</th><th>route</th><th>method</th><th>path</th><th>status</th><th>attempts</th><th>ms</th><th>tokens</th></tr>
+          <tr><th>Time</th><th>Route</th><th>Method</th><th>Path</th><th>Status</th><th>Attempts</th><th>ms</th><th>Tokens</th></tr>
         </thead>
         <tbody></tbody>
       </table>
     </div>
-    <pre id="request-detail" class="detail">select a request</pre>
+    <aside class="request-inspector"><h2>Request details</h2><pre id="request-detail" class="detail" tabindex="0">Select a request to inspect its response, token usage and captured bodies.</pre></aside>
   </div>
 </section>
 
 <section id="tab-config" class="tab">
   <div class="toolbar">
     <span id="config-path"></span>
-    <button id="config-validate">Validate</button>
-    <button id="config-save">Save &amp; apply</button>
-    <span id="config-status"></span>
+    <button id="config-reload" disabled>Reload from disk</button>
+    <button id="config-validate" disabled>Validate</button>
+    <button id="config-save" class="primary" disabled>Save &amp; apply</button>
   </div>
+  <p id="config-status" role="status"></p>
   <div id="config-editor-container"></div>
 </section>
 
 </main>
 
-<div id="login" class="modal hidden">
+<dialog id="login" aria-labelledby="login-title">
   <form id="login-form" class="modal-box">
-    <h2>Sign in</h2>
+    <span class="brand-mark" aria-hidden="true">h</span>
+    <h2 id="login-title">Welcome to heka</h2>
+    <p class="modal-description">Sign in to manage your AI gateway.</p>
     <div class="field">
       <label for="login-user">User</label>
-      <input id="login-user" type="text" autocomplete="username" autofocus>
+      <input id="login-user" type="text" autocomplete="username" required autofocus>
     </div>
     <div class="field">
       <label for="login-password">Password</label>
-      <input id="login-password" type="password" autocomplete="current-password">
+      <input id="login-password" type="password" autocomplete="current-password" required>
     </div>
     <button type="submit">Sign in</button>
     <p id="login-error" class="error" role="alert"></p>
   </form>
-</div>
+</dialog>
+
+<dialog id="disable-dialog" aria-labelledby="disable-title" aria-describedby="disable-description">
+  <form id="disable-form" class="modal-box">
+    <span class="danger-symbol" aria-hidden="true">!</span>
+    <h2 id="disable-title">Disable this key forever?</h2>
+    <p id="disable-target" class="disable-target"></p>
+    <p id="disable-description" class="modal-description">heka will stop using this key across all providers. It stays disabled after restarts, config changes and resets. This cannot be undone from the dashboard.</p>
+    <p id="disable-last-key" class="warning hidden">No other available keys will remain for this provider. Requests will fail until another key is added or restored.</p>
+    <p class="modal-description">Requests already in progress may finish. The key is not revoked at the upstream provider.</p>
+    <p id="disable-error" class="error" role="alert"></p>
+    <div class="dialog-actions">
+      <button id="disable-cancel" type="button" autofocus>Cancel</button>
+      <button id="disable-confirm" type="submit" class="danger">Disable forever</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="codemirror.bundle.js"></script>
 <script src="app.js"></script>

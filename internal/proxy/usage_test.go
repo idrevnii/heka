@@ -97,6 +97,20 @@ func TestUsageOpenAI(t *testing.T) {
 	}
 }
 
+func TestUsageZeroPromptAndMultilineSSE(t *testing.T) {
+	if got := scan(t, "", `{"usage":{"prompt_tokens":0,"completion_tokens":4}}`); got.Output != 4 {
+		t.Fatalf("zero-prompt completion lost its output tokens: %+v", got)
+	}
+	got := scan(t, "", "event: message\ndata: {\"usage\": {\ndata: \"prompt_tokens\": 10,\n: comment\ndata: \"completion_tokens\": 3}}\n\n")
+	if got != (keypool.Usage{Input: 10, Output: 3}) {
+		t.Fatalf("multiline SSE usage=%+v", got)
+	}
+	huge := `{"padding":"` + strings.Repeat("x", maxUsageChunk) + "\n" + `{"usage":{"prompt_tokens":999}}`
+	if got := scan(t, "", huge); got != (keypool.Usage{}) {
+		t.Fatalf("oversized JSON suffix was interpreted as a standalone response: %+v", got)
+	}
+}
+
 func TestUsageGemini(t *testing.T) {
 	got := scan(t, "", `{"usageMetadata":{"promptTokenCount":1000,"cachedContentTokenCount":600,
 		"candidatesTokenCount":30}}`)

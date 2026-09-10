@@ -32,9 +32,12 @@ const (
 // OpenAI sends one usage object in the last chunk, Gemini repeats a growing
 // usageMetadata in every chunk.
 type usageScanner struct {
-	total   keypool.Usage
-	line    []byte
-	dropped bool // current segment exceeded maxUsageChunk
+	total        keypool.Usage
+	line         []byte
+	dropped      bool // current segment exceeded maxUsageChunk
+	sse          bool
+	event        []byte
+	eventDropped bool
 
 	gz    *bytes.Buffer // set when the body is gzipped: inflate at close
 	gzOff bool          // gzip buffer overflowed; stop collecting
@@ -44,11 +47,13 @@ type usageScanner struct {
 // read on the fly — a content encoding heka can't inflate. A nil scanner
 // discards everything written to it, so callers need no nil checks.
 func newUsageScanner(resp *http.Response) *usageScanner {
+	u := &usageScanner{sse: strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")}
 	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
 	case "", "identity":
-		return &usageScanner{}
+		return u
 	case "gzip":
-		return &usageScanner{gz: &bytes.Buffer{}}
+		u.gz = &bytes.Buffer{}
+		return u
 	default:
 		return nil
 	}
@@ -82,17 +87,32 @@ func (u *usageScanner) Write(p []byte) {
 	}
 }
 
-// endLine decides what the buffer means at a line boundary. An SSE data
-// line is a complete payload, so it gets parsed and consumed; SSE framing
-// lines carry nothing and are dropped; anything else keeps accumulating,
-// because a plain response body is one document however it's wrapped.
+// SSE joins data lines until the blank line ending an event. Plain JSON
+// keeps accumulating as one document, even after exceeding the size cap.
 func (u *usageScanner) endLine() {
-	trimmed := bytes.TrimLeft(u.line, " \t\r\n")
-	switch {
-	case len(trimmed) == 0 || isSSEField(trimmed):
-		u.line, u.dropped = u.line[:0], false
-	case bytes.HasPrefix(trimmed, []byte("data:")):
-		u.scanLine()
+	trimmed := bytes.TrimSpace(u.line)
+	if !u.sse {
+		u.sse = isSSEField(trimmed) || bytes.HasPrefix(trimmed, []byte("data:"))
+		if !u.sse {
+			return
+		}
+	}
+	dropped := u.dropped
+	u.line, u.dropped = u.line[:0], false
+	if dropped {
+		u.eventDropped = true
+		return
+	}
+	if len(trimmed) == 0 {
+		u.scan(u.event, u.eventDropped)
+		u.event, u.eventDropped = u.event[:0], false
+	} else if data, ok := bytes.CutPrefix(trimmed, []byte("data:")); ok {
+		if u.eventDropped || len(u.event)+len(data)+1 > maxUsageChunk {
+			u.event, u.eventDropped = u.event[:0], true
+			return
+		}
+		u.event = append(u.event, data...)
+		u.event = append(u.event, '\n')
 	}
 }
 
@@ -116,11 +136,8 @@ func (u *usageScanner) appendLine(p []byte) {
 	u.line = append(u.line, p...)
 }
 
-// scanLine consumes the pending segment: one SSE event payload, or — for a
-// plain JSON response, which has no newlines — the whole body.
-func (u *usageScanner) scanLine() {
-	line, dropped := u.line, u.dropped
-	u.line, u.dropped = u.line[:0], false
+// scan reads a complete SSE event or plain JSON document.
+func (u *usageScanner) scan(line []byte, dropped bool) {
 	if dropped {
 		return
 	}
@@ -165,11 +182,17 @@ func (u *usageScanner) close() keypool.Usage {
 		// A truncated gzip stream still inflates up to the cut; the read
 		// error at the end is expected and the prefix is what we want.
 		if zr, err := gzip.NewReader(bytes.NewReader(buf.Bytes())); err == nil {
+			defer zr.Close()
 			plain, _ := io.ReadAll(io.LimitReader(zr, maxUsageChunk*4))
 			u.Write(plain)
 		}
 	}
-	u.scanLine()
+	if u.sse {
+		u.endLine()
+		u.scan(u.event, u.eventDropped)
+	} else {
+		u.scan(u.line, u.dropped)
+	}
 	return u.total
 }
 
@@ -231,7 +254,7 @@ func (e usageEnvelope) usage() keypool.Usage {
 		return u
 	}
 	switch {
-	case t.PromptTokens > 0 || t.PromptTokensDetails != nil:
+	case t.PromptTokens > 0 || t.CompletionTokens > 0 || t.PromptTokensDetails != nil:
 		// OpenAI chat completions: prompt_tokens is the whole prompt,
 		// cached tokens included.
 		u.Input = t.PromptTokens

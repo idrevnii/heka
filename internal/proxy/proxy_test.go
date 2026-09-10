@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,9 +16,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/idrevnii/heka/internal/config"
+	"github.com/idrevnii/heka/internal/history"
 	"github.com/idrevnii/heka/internal/keypool"
 )
 
@@ -339,7 +344,8 @@ func TestCheckProbesOneKey(t *testing.T) {
 			io.WriteString(w, `{"error":"unknown model"}`)
 		}
 	})
-	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1, key2)
+	h, pool := newHandler(t, up.srv.URL+"?api-version=test", config.KeyIn{Header: "Authorization", Prefix: "Bearer "}, key1, key2)
+	pool.ReportInvalid(0, keypool.ErrorDetail{Status: 401})
 
 	status, msg, err := h.Check(context.Background(), 0, key1, "deepseek-v4-flash")
 	if err != nil || status != http.StatusOK || msg != `{"choices":[]}` {
@@ -347,6 +353,9 @@ func TestCheckProbesOneKey(t *testing.T) {
 	}
 	if got := up.requests[0].URL.Path; got != "/v1/chat/completions" {
 		t.Fatalf("path = %q", got)
+	}
+	if got := up.requests[0].URL.Query().Get("api-version"); got != "test" {
+		t.Fatalf("key check lost base URL query: %q", got)
 	}
 	if got := up.requests[0].Header.Get("Authorization"); got != "Bearer "+key1 {
 		t.Fatalf("authorization = %q", got)
@@ -381,8 +390,86 @@ func TestCheckProbesOneKey(t *testing.T) {
 	if _, _, err := h.Check(context.Background(), 0, key1, "no-such-model"); err != nil {
 		t.Fatal(err)
 	}
-	if st := pool.Snapshot()[0]; st.Successes != 1 || st.Failures != 1 {
+	if st := pool.Snapshot()[0]; st.Successes != 1 || st.Failures != 2 {
 		t.Fatalf("key 0 after a 404 check = %+v", st)
+	}
+}
+
+func TestCompressedErrorTextIsBounded(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(bytes.Repeat([]byte("x"), 2<<20))
+	zw.Close()
+	if got := errorText(buf.Bytes(), "GZip"); len(got) > errPeekMax || len(got) == 0 {
+		t.Fatalf("decoded error size=%d, limit=%d", len(got), errPeekMax)
+	}
+}
+
+func TestAllConnectionHeaderValuesAreStripped(t *testing.T) {
+	headers := http.Header{
+		"Connection": {"X-First", "X-Second"},
+		"X-First":    {"private"}, "X-Second": {"private"}, "X-End-To-End": {"keep"},
+	}
+	stripHopByHop(headers)
+	if headers.Get("X-First") != "" || headers.Get("X-Second") != "" || headers.Get("X-End-To-End") != "keep" {
+		t.Fatalf("hop headers leaked: %v", headers)
+	}
+}
+
+func TestRetryAfterCannotOverflow(t *testing.T) {
+	resp := &http.Response{Header: http.Header{"Retry-After": {"9223372036854775807"}}}
+	if duration, ok := retryAfter(resp); !ok || duration < time.Hour {
+		t.Fatalf("long retry-after overflowed: %v, %v", duration, ok)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestInterruptedStreamAbortsAndRecordsError(t *testing.T) {
+	h, _ := newHandler(t, "http://upstream.example", config.KeyIn{}, key1)
+	h.History = history.New(5, 5, 1024)
+	h.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, ContentLength: -1,
+			Body: io.NopCloser(io.MultiReader(strings.NewReader("data: partial\n\n"), iotest.ErrReader(io.ErrUnexpectedEOF))),
+		}, nil
+	})
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Errorf("broken stream must abort the HTTP response, got %v", got)
+		}
+		records := h.History.List(history.Filter{OnlyErrors: true})
+		if len(records) != 1 || records[0].Err == "" || records[0].Attempts != 1 {
+			t.Errorf("stream error missing from history: %+v", records)
+		}
+	}()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/stream", nil))
+}
+
+func TestCancelledKeyCheckDoesNotCountFailure(t *testing.T) {
+	h, pool := newHandler(t, "http://upstream.example", config.KeyIn{}, key1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() })
+	if _, _, err := h.Check(ctx, 0, key1, "model"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if pool.Snapshot()[0].Failures != 0 {
+		t.Fatal("cancelled key check counted as an upstream failure")
+	}
+}
+
+func TestCheckHonorsDisableBudget(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request, n int) { w.WriteHeader(401) })
+	h, pool := newHandler(t, up.srv.URL, config.KeyIn{Header: "X-Key"}, key1)
+	h.Params.MaxDisables = 0
+	if status, _, err := h.Check(context.Background(), 0, key1, "model"); status != 401 || err != nil {
+		t.Fatalf("check status=%d, error=%v", status, err)
+	}
+	if st := pool.Snapshot()[0]; st.State != "active" || st.Failures != 1 {
+		t.Fatalf("check ignored max_disables=0: %+v", st)
 	}
 }
 

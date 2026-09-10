@@ -74,15 +74,16 @@ func (s *Supervisor) run(ctx context.Context) {
 		cmd.WaitDelay = 5 * time.Second
 		started := time.Now()
 		err := cmd.Run()
+		s.healthy.Store(false)
 		if ctx.Err() != nil {
 			return
 		}
-		s.Log.Warn("sidecar exited", "sidecar", s.Name, "error", err, "restart_in", backoff)
 		// A process that survived a while gets a fresh backoff; only
 		// crash loops escalate the delay.
 		if time.Since(started) > 30*time.Second {
 			backoff = time.Second
 		}
+		s.Log.Warn("sidecar exited", "sidecar", s.Name, "error", err, "restart_in", backoff)
 		select {
 		case <-ctx.Done():
 			return
@@ -93,7 +94,10 @@ func (s *Supervisor) run(ctx context.Context) {
 }
 
 func (s *Supervisor) health(ctx context.Context) {
-	client := &http.Client{Timeout: time.Second}
+	defer s.healthy.Store(false)
+	client := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
 	target := s.URL
 	if target == "" {
 		target = fmt.Sprintf("http://127.0.0.1:%d/", s.Port)

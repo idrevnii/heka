@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -133,18 +133,11 @@ func (c *Capture) apply(p *CaptureParams) {
 	}
 }
 
-// CaptureFor resolves the effective capture policy for a provider or
-// sidecar route: built-in defaults (off) ← provider/sidecar capture.
-func (c *Config) CaptureFor(name string) CaptureParams {
+// Params resolves capture for this specific provider or sidecar. Names can
+// overlap between the two sections, so callers pass the section itself.
+func (c *Capture) Params() CaptureParams {
 	p := defaultCapture()
-	if prov, ok := c.Providers[name]; ok {
-		prov.Capture.apply(&p)
-		return p
-	}
-	if sc, ok := c.Sidecar[name]; ok {
-		sc.Capture.apply(&p)
-		return p
-	}
+	c.apply(&p)
 	return p
 }
 
@@ -293,14 +286,19 @@ func (s *Size) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("invalid size %q: %w", raw, err)
 	}
+	var shift uint
 	switch m[2] {
 	case "KiB":
-		n <<= 10
+		shift = 10
 	case "MiB":
-		n <<= 20
+		shift = 20
 	case "GiB":
-		n <<= 30
+		shift = 30
 	}
+	if n > math.MaxInt64>>shift {
+		return fmt.Errorf("size %q overflows int64", raw)
+	}
+	n <<= shift
 	if n <= 0 {
 		return fmt.Errorf("size %q must be positive", raw)
 	}
@@ -323,11 +321,16 @@ func Load(path string) (*Config, error) {
 // dashboard's editor.
 func Parse(raw []byte, source string) (*Config, error) {
 	var doc yaml.Node
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
+	yamlDec := yaml.NewDecoder(bytes.NewReader(raw))
+	if err := yamlDec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	if doc.Kind == 0 {
 		return nil, fmt.Errorf("%s: config is empty", source)
+	}
+	var extra yaml.Node
+	if err := yamlDec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%s: config must contain exactly one YAML document", source)
 	}
 	var missing []string
 	expandEnvNode(&doc, &missing)
@@ -405,7 +408,7 @@ func saveBackup(path string, keep int) error {
 	if err != nil {
 		return err
 	}
-	stamp := time.Now().UTC().Format("20060102T150405Z")
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	bakPath := path + ".bak-" + stamp
 	if err := os.WriteFile(bakPath, cur, 0o600); err != nil {
 		return err
@@ -417,14 +420,19 @@ func pruneBackups(path string, keep int) error {
 	if keep <= 0 {
 		return nil
 	}
-	matches, err := filepath.Glob(path + ".bak-*")
+	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
 		return err
+	}
+	var matches []string
+	for _, entry := range entries { // ReadDir sorts filenames chronologically by their suffix.
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), filepath.Base(path)+".bak-") {
+			matches = append(matches, filepath.Join(filepath.Dir(path), entry.Name()))
+		}
 	}
 	if len(matches) <= keep {
 		return nil
 	}
-	sort.Strings(matches) // timestamp suffix sorts chronologically
 	for _, m := range matches[:len(matches)-keep] {
 		os.Remove(m)
 	}
@@ -545,6 +553,9 @@ func (r *Rotation) validate(where string) error {
 	if r.MaxDisables != nil && *r.MaxDisables < 0 {
 		return fmt.Errorf("%s: max_disables must be >= 0", where)
 	}
+	if r.MaxBodyBuffer != nil && int64(*r.MaxBodyBuffer) == math.MaxInt64 {
+		return fmt.Errorf("%s: max_body_buffer must be < %d", where, int64(math.MaxInt64))
+	}
 	for _, list := range [][]int{r.CooldownOn, r.DisableOn} {
 		for _, code := range list {
 			if code < 100 || code > 599 {
@@ -579,6 +590,9 @@ func (k *KeyIn) validate(where string) error {
 		return fmt.Errorf("%s: one of header or query is required", where)
 	case k.Prefix != "" && k.Header == "":
 		return fmt.Errorf("%s: prefix requires header", where)
+	}
+	if k.Header != "" && !headerRe.MatchString(k.Header) {
+		return fmt.Errorf("%s: invalid HTTP header name %q", where, k.Header)
 	}
 	return nil
 }

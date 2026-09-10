@@ -1,8 +1,8 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
 	"hash/fnv"
 	"io"
 	"net/http"
@@ -81,6 +81,7 @@ func affinityOf(r *http.Request, body []byte, p config.AffinityParams) (hash uin
 		return h.Sum64(), true
 	}
 	write("system")             // Anthropic, OpenAI chat
+	write("instructions")       // OpenAI Responses
 	write("system_instruction") // Gemini
 	write("systemInstruction")  // Gemini, camelCase dialect
 	write("tools")
@@ -117,7 +118,9 @@ func firstElem(raw json.RawMessage) (json.RawMessage, bool) {
 // message would otherwise change its hash and unpin the conversation.
 func writeCanonical(h io.Writer, raw json.RawMessage) {
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		h.Write(raw)
 		return
 	}
@@ -137,7 +140,8 @@ func writeValue(h io.Writer, v any) {
 		slices.Sort(keys)
 		io.WriteString(h, "{")
 		for _, k := range keys {
-			io.WriteString(h, k)
+			encoded, _ := json.Marshal(k)
+			h.Write(encoded)
 			io.WriteString(h, ":")
 			writeValue(h, t[k])
 			io.WriteString(h, ",")
@@ -151,6 +155,7 @@ func writeValue(h io.Writer, v any) {
 		}
 		io.WriteString(h, "]")
 	default:
-		fmt.Fprintf(h, "%v", t)
+		encoded, _ := json.Marshal(t)
+		h.Write(encoded)
 	}
 }

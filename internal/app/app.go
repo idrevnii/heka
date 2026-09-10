@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -102,6 +104,10 @@ type App struct {
 	// a request is in flight — request handling reads server.Server's own
 	// atomically-swapped state, not App's.
 	mu sync.Mutex
+	// Serializes disk reads, version checks, application and persistence.
+	reloadMu     sync.Mutex
+	diskVersion  string
+	watchChanged chan struct{}
 
 	rootCtx  context.Context
 	rootStop context.CancelFunc
@@ -117,6 +123,7 @@ type App struct {
 
 	providers map[string]*provInst
 	sidecars  map[string]*sideInst
+	blocked   sync.Map // fingerprint -> true; shared with current and retired pools
 }
 
 // New loads (seeding first if configured and absent) and applies the config
@@ -143,11 +150,32 @@ func New(opts Options) (*App, error) {
 
 	rootCtx, rootStop := context.WithCancel(context.Background())
 	a := &App{
-		opts:      opts,
-		rootCtx:   rootCtx,
-		rootStop:  rootStop,
-		providers: map[string]*provInst{},
-		sidecars:  map[string]*sideInst{},
+		opts:         opts,
+		rootCtx:      rootCtx,
+		rootStop:     rootStop,
+		providers:    map[string]*provInst{},
+		sidecars:     map[string]*sideInst{},
+		diskVersion:  config.Version(raw),
+		watchChanged: make(chan struct{}, 1),
+	}
+	blocked, err := os.ReadFile(opts.ConfigPath + ".disabled-keys.json")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		rootStop()
+		return nil, fmt.Errorf("read disabled keys: %w", err)
+	}
+	if err == nil {
+		var ids []string
+		if err := json.Unmarshal(blocked, &ids); err != nil {
+			rootStop()
+			return nil, fmt.Errorf("read disabled keys: %w", err)
+		}
+		for _, id := range ids {
+			if decoded, err := hex.DecodeString(id); err != nil || len(decoded) != sha256.Size {
+				rootStop()
+				return nil, errors.New("invalid fingerprint in disabled keys file")
+			}
+			a.blocked.Store(id, true)
+		}
 	}
 	if _, err := a.apply(cfg, raw); err != nil {
 		rootStop()
@@ -164,7 +192,20 @@ func seedConfig(seedPath, configPath string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0o600)
+	f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil // another startup or editor created the live file first
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		os.Remove(configPath)
+		return err
+	}
+	return nil
 }
 
 // Server returns the http.Handler to run the gateway (and dashboard) on.
@@ -192,11 +233,16 @@ func (a *App) ApplyBytes(data []byte, ifVersion string) (Result, error) {
 		return Result{}, &ValidationError{err}
 	}
 
-	a.mu.Lock()
-	current := a.version
-	a.mu.Unlock()
-	if ifVersion != "" && ifVersion != current {
-		return Result{}, &ConflictError{Current: current}
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+	if ifVersion != "" {
+		raw, err := os.ReadFile(a.opts.ConfigPath)
+		if err != nil {
+			return Result{}, err
+		}
+		if current := config.Version(raw); ifVersion != current {
+			return Result{}, &ConflictError{Current: current}
+		}
 	}
 
 	res, err := a.apply(cfg, data)
@@ -206,12 +252,15 @@ func (a *App) ApplyBytes(data []byte, ifVersion string) (Result, error) {
 	if err := config.Save(a.opts.ConfigPath, data, true, 10); err != nil {
 		return res, &PersistError{err}
 	}
+	a.diskVersion = config.Version(data)
 	return res, nil
 }
 
 // ReloadFromDisk re-reads and re-applies the config file as-is (SIGHUP, or
 // the periodic watcher noticing an out-of-band edit).
 func (a *App) ReloadFromDisk() (Result, error) {
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
 	raw, err := os.ReadFile(a.opts.ConfigPath)
 	if err != nil {
 		return Result{}, err
@@ -220,14 +269,19 @@ func (a *App) ReloadFromDisk() (Result, error) {
 	if err != nil {
 		return Result{}, &ValidationError{err}
 	}
-	return a.apply(cfg, raw)
+	res, err := a.apply(cfg, raw)
+	if err == nil {
+		a.diskVersion = config.Version(raw)
+	}
+	return res, err
 }
 
 // Watch polls the config file every `every` and reloads when its content
 // changes — this is what makes editing the file directly on a volume work
 // without exec'ing into the container. Comparing against the hash of the
-// last *applied* config (rather than mtime) means it never re-applies its
-// own ApplyBytes writes. Returns when ctx is done.
+// last loaded/saved file (rather than mtime) avoids re-applying its own
+// writes, or undoing an in-memory apply whose persistence failed.
+// Returns when ctx is done.
 func (a *App) Watch(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		every = 10 * time.Second
@@ -238,15 +292,17 @@ func (a *App) Watch(ctx context.Context, every time.Duration) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-a.watchChanged:
+			ticker.Reset(a.DashboardParams().Watch)
 		case <-ticker.C:
 			raw, err := os.ReadFile(a.opts.ConfigPath)
 			if err != nil {
 				a.opts.Log.Warn("config watch: read failed", "error", err)
 				continue
 			}
-			a.mu.Lock()
-			changed := config.Version(raw) != a.version
-			a.mu.Unlock()
+			a.reloadMu.Lock()
+			changed := config.Version(raw) != a.diskVersion
+			a.reloadMu.Unlock()
 			if !changed {
 				continue
 			}
@@ -351,6 +407,43 @@ func (a *App) ResetStatusKey(provider string, key int) error {
 	return nil
 }
 
+var ErrKeyNotFound = errors.New("provider or key no longer exists")
+var ErrKeyChanged = errors.New("key changed since this page was loaded; refresh and try again")
+
+// DisableStatusKey persists a permanent block before reporting success.
+// The fingerprint protects against an index being reused after a reload.
+// The block follows the secret across providers, reordering and restarts.
+func (a *App) DisableStatusKey(provider string, idx int, id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.cfg.Providers[provider]
+	if p == nil || idx < 0 || idx >= len(p.Keys) {
+		return ErrKeyNotFound
+	}
+	if id != keypool.Fingerprint(p.Keys[idx]) {
+		return ErrKeyChanged
+	}
+	if _, exists := a.blocked.Load(id); exists {
+		return nil
+	}
+	ids := []string{id}
+	a.blocked.Range(func(k, _ any) bool {
+		ids = append(ids, k.(string))
+		return true
+	})
+	slices.Sort(ids)
+	data, err := json.MarshalIndent(ids, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := config.Save(a.opts.ConfigPath+".disabled-keys.json", data, false, 0); err != nil {
+		return fmt.Errorf("could not persist key block; key was not disabled: %w", err)
+	}
+	a.blocked.Store(id, true)
+	a.opts.Log.Warn("key permanently disabled", "provider", provider, "key", keypool.Mask(p.Keys[idx]))
+	return nil
+}
+
 // checkable returns the applied config of a provider that has a key check
 // configured, or nil. Callers must hold a.mu.
 func (a *App) checkable(name string) *config.Provider {
@@ -396,6 +489,8 @@ func (a *App) CheckKey(ctx context.Context, provider string, idx int) (CheckResu
 		return CheckResult{}, fmt.Errorf("provider %q has no check_model configured", provider)
 	case secret == "":
 		return CheckResult{}, fmt.Errorf("provider %q has no key %d", provider, idx)
+	case pi.pool.IsBlocked(idx):
+		return CheckResult{}, errors.New("key is permanently disabled")
 	}
 
 	// A one-token completion is fast; slower than this is a hung upstream,
@@ -414,13 +509,13 @@ func (a *App) CheckKey(ctx context.Context, provider string, idx int) (CheckResu
 // waits for everything to finish, up to timeout.
 func (a *App) Shutdown(timeout time.Duration) {
 	a.mu.Lock()
+	a.rootStop()
 	sidecars := make([]*sideInst, 0, len(a.sidecars))
 	for _, si := range a.sidecars {
 		sidecars = append(sidecars, si)
 	}
 	a.mu.Unlock()
 
-	a.rootStop()
 	for _, si := range sidecars {
 		si.sup.Wait(timeout)
 	}
@@ -444,6 +539,9 @@ func (a *App) Shutdown(timeout time.Duration) {
 func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.rootCtx.Err(); err != nil {
+		return Result{}, err
+	}
 
 	var added, removed, updated []string
 
@@ -453,9 +551,9 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 
 	for name, p := range cfg.Providers {
 		rot := cfg.RotationFor(name)
-		capture := cfg.CaptureFor(name)
+		capture := p.Capture.Params()
 		poolFP := fingerprint(p.Keys, rot.CooldownBase, rot.CooldownMax)
-		handlerFP := fingerprint(p.BaseURL, p.KeyIn, rot.MaxRetries, rot.MaxBodyBuffer,
+		handlerFP := fingerprint(p.BaseURL, p.KeyIn, rot.MaxRetries, rot.MaxDisables, rot.MaxBodyBuffer,
 			rot.CooldownOn, rot.DisableOn, rot.Affinity, capture)
 
 		prev, existed := a.providers[name]
@@ -464,7 +562,7 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 		if existed && prev.poolFP == poolFP {
 			pool = prev.pool
 		} else {
-			pool = keypool.New(keypool.Config{CooldownBase: rot.CooldownBase, CooldownMax: rot.CooldownMax}, p.Keys)
+			pool = keypool.New(keypool.Config{CooldownBase: rot.CooldownBase, CooldownMax: rot.CooldownMax, Blocked: &a.blocked}, p.Keys)
 		}
 
 		var handler *proxy.Handler
@@ -517,9 +615,9 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 	sidecarStates := map[string]func() string{}
 
 	for name, sc := range cfg.Sidecar {
-		capture := cfg.CaptureFor(name)
+		capture := sc.Capture.Params()
 		supFP := fingerprint(sc.Command, sc.Port, sc.URL, healthIntervalValue(sc.HealthInterval))
-		handlerFP := fingerprint(sc.Key, keyInValue(sc.KeyIn), capture, sc.Route)
+		handlerFP := fingerprint(sc.Key, keyInValue(sc.KeyIn), capture, sc.Route, cfg.DefaultRotation().MaxBodyBuffer)
 
 		prev, existed := a.sidecars[name]
 
@@ -531,6 +629,9 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 			added = append(added, "sidecar:"+name)
 		case prev.supFP == supFP:
 			sup, cancel = prev.sup, prev.cancel
+			if prev.handlerFP != handlerFP {
+				updated = append(updated, "sidecar:"+name)
+			}
 		default:
 			if len(sc.Command) > 0 {
 				// Stop first: the new child would otherwise race the old
@@ -588,12 +689,13 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 
 	// Swap: single atomic pointer store (or first-time construction).
 	st := &server.State{
-		Tokens:        cfg.Auth.Tokens,
-		User:          cfg.Auth.User,
-		PasswordHash:  cfg.Auth.PasswordHash,
-		Routes:        routes,
-		Pools:         pools,
-		SidecarStates: sidecarStates,
+		Tokens:            cfg.Auth.Tokens,
+		User:              cfg.Auth.User,
+		PasswordHash:      cfg.Auth.PasswordHash,
+		DashboardDisabled: !cfg.DefaultDashboard().Enabled,
+		Routes:            routes,
+		Pools:             pools,
+		SidecarStates:     sidecarStates,
 	}
 	if a.srv == nil {
 		a.srv = server.New(st, a.opts.Log)
@@ -619,7 +721,14 @@ func (a *App) apply(cfg *config.Config, raw []byte) (Result, error) {
 
 	a.providers = newProviders
 	a.sidecars = newSidecars
+	watchChanged := a.cfg != nil && a.cfg.DefaultDashboard().Watch != cfg.DefaultDashboard().Watch
 	a.cfg = cfg
+	if watchChanged {
+		select {
+		case a.watchChanged <- struct{}{}:
+		default:
+		}
+	}
 	a.appliedAt = time.Now()
 	if raw != nil {
 		a.version = config.Version(raw)
@@ -661,7 +770,10 @@ func (a *App) retireSidecar(prev *sideInst) {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		time.Sleep(5 * time.Second)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-a.rootCtx.Done():
+		}
 		prev.cancel()
 		prev.sup.Wait(8 * time.Second)
 	}()

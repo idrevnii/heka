@@ -98,16 +98,49 @@ func TestSaveAtomicWithBackup(t *testing.T) {
 
 func TestSavePruneBackups(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "heka.yaml")
+	path := filepath.Join(dir, "heka[dev].yaml")
 	for i := 0; i < 5; i++ {
 		if err := Save(path, []byte{byte('a' + i)}, true, 2); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(time.Millisecond) // ensure distinct timestamps
 	}
-	matches, _ := filepath.Glob(path + ".bak-*")
-	if len(matches) > 2 {
-		t.Fatalf("backups not pruned: %v", matches)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "heka[dev].yaml.bak-") {
+			matches = append(matches, filepath.Join(dir, entry.Name()))
+		}
+	}
+	if len(matches) != 2 {
+		t.Fatalf("expected the last two backups: %v", matches)
+	}
+	for i, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != string(rune('c'+i)) {
+			t.Fatalf("backup=%q, error=%v", data, err)
+		}
+	}
+}
+
+func TestParseRejectsTrailingDocumentsAndOverflow(t *testing.T) {
+	base := "auth: {tokens: [token]}\nproviders:\n  p:\n    base_url: https://example.com\n    keys: [key]\n    key_in: {header: X-Key}\n"
+	for _, extra := range []string{
+		"---\nauth: {tokens: []}\n",
+		"---\n: [broken\n",
+		"rotation: {max_body_buffer: 18014398509481985KiB}\n",
+		"rotation: {max_body_buffer: 9223372036854775807}\n",
+	} {
+		if _, err := Parse([]byte(base+extra), "test"); err == nil {
+			t.Errorf("accepted invalid config suffix %q", extra)
+		}
+	}
+	for _, header := range []string{"bad header", `X-Key\nInjected`} {
+		if _, err := Parse([]byte(strings.Replace(base, "X-Key", header, 1)), "test"); err == nil {
+			t.Errorf("accepted invalid HTTP header %q", header)
+		}
 	}
 }
 
@@ -150,7 +183,7 @@ func TestCaptureDefaultsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capp := cfg.CaptureFor("anthropic")
+	capp := cfg.Providers["anthropic"].Capture.Params()
 	if capp.Body {
 		t.Fatal("capture.body must default to false")
 	}
@@ -172,7 +205,7 @@ providers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	capp := cfg.CaptureFor("anthropic")
+	capp := cfg.Providers["anthropic"].Capture.Params()
 	if !capp.Body {
 		t.Fatal("capture.body should be true")
 	}

@@ -58,7 +58,7 @@ function parseArgs(argv) {
       process.exit(2);
     }
     const value = argv[++i];
-    if (value === undefined) {
+    if (value === undefined || Object.hasOwn(flags, value) || ["--dry-run", "--help", "-h"].includes(value)) {
       console.error(`${arg} needs a value`);
       process.exit(2);
     }
@@ -87,8 +87,11 @@ function usage() {
 // node's module resolution first, then fall back to the well-known bun global
 // install path.
 function findCatalog(explicit) {
+  if (explicit) {
+    if (!existsSync(explicit)) throw new Error(`catalog not found: ${explicit}`);
+    return explicit;
+  }
   const candidates = [];
-  if (explicit) candidates.push(explicit);
   const require = createRequire(import.meta.url);
   for (const from of [process.cwd(), homedir()]) {
     try {
@@ -136,6 +139,9 @@ function toModel(entry, defaultApi) {
 const opts = parseArgs(process.argv.slice(2));
 const catalogPath = findCatalog(opts.catalog);
 const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
+  throw new Error("catalog must be a JSON object");
+}
 
 // openai-completions and openai-responses share both the /v1 base path and
 // Bearer auth, so they go through the same heka route.
@@ -156,7 +162,7 @@ const groups = [
   },
 ];
 
-const providers = {};
+const providers = Object.create(null);
 const summary = [];
 for (const group of groups) {
   const models = group.apis
@@ -186,6 +192,10 @@ if (existsSync(opts.out)) {
     console.error(`${opts.out} is not valid JSON: ${err.message}`);
     process.exit(1);
   }
+}
+if (!existing || typeof existing !== "object" || Array.isArray(existing) ||
+    (existing.providers !== undefined && (!existing.providers || typeof existing.providers !== "object" || Array.isArray(existing.providers)))) {
+  throw new Error(`${opts.out} must contain a JSON object with an optional providers object`);
 }
 
 // Merge so hand-written providers in models.json survive; only the two

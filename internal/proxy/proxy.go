@@ -7,10 +7,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -155,6 +157,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// response back instead of walking the rest of the pool.
 		capped = v == vInvalidKey && h.Pool != nil && disabled >= h.Params.MaxDisables
 		if capped {
+			h.Pool.ReportFailure(keyIdx)
 			h.Log.Warn("disable cap reached",
 				"provider", h.Name,
 				"key", h.Pool.MaskedKey(keyIdx),
@@ -214,17 +217,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lastV == vOK {
 		scanner = newUsageScanner(resp)
 	}
-	copyResponse(w, resp, respSink, scanner)
+	copyErr := copyResponse(w, resp, respSink, scanner)
 	usage := scanner.close()
 	if h.Pool != nil && keyIdx >= 0 {
 		h.Pool.ReportUsage(keyIdx, usage)
 	}
+	if copyErr != nil {
+		verdictStr = "response_error"
+		if r.Context().Err() != nil {
+			verdictStr = "client_gone"
+		} else {
+			h.Log.Warn("upstream response interrupted", "provider", h.Name, "error", copyErr)
+		}
+		if respSink != nil {
+			respSink.truncated = true
+		}
+	}
 	h.finish(r, start, finishInfo{
 		status: resp.StatusCode, attempts: attempts, keyIdx: keyIdx, verdict: verdictStr,
+		err:     copyErr,
 		reqBody: reqSink, respBody: respSink, streaming: streaming, usage: usage,
 		reqCT: r.Header.Get("Content-Type"), respCT: resp.Header.Get("Content-Type"),
 		respEnc: resp.Header.Get("Content-Encoding"),
 	})
+	if copyErr != nil {
+		// Headers are already sent. Abort so a truncated chunked response
+		// cannot look like a successfully completed stream to the client.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // acquire picks the next key, honouring the request's affinity when one
@@ -324,6 +344,9 @@ const checkPath = "/v1/chat/completions"
 // cooldown ceiling reads as "active" again long before it really is, and
 // only a real request can tell the difference.
 func (h *Handler) Check(ctx context.Context, idx int, secret, model string) (status int, message string, err error) {
+	if h.Pool.IsBlocked(idx) {
+		return 0, "", fmt.Errorf("key is permanently disabled")
+	}
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 1,
@@ -332,20 +355,20 @@ func (h *Handler) Check(ctx context.Context, idx int, secret, model string) (sta
 	if err != nil {
 		return 0, "", err
 	}
-	raw := h.Target.Scheme + "://" + h.Target.Host + strings.TrimSuffix(h.Target.EscapedPath(), "/") + checkPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, raw, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, checkPath, nil)
 	if err != nil {
 		return 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	switch {
-	case h.KeyIn.Header != "":
-		req.Header.Set(h.KeyIn.Header, h.KeyIn.Prefix+secret)
-	case h.KeyIn.Query != "":
-		req.URL.RawQuery = replaceQueryParam(req.URL.RawQuery, h.KeyIn.Query, secret)
+	req, err = h.outbound(req, secret, body, true)
+	if err != nil {
+		return 0, "", err
 	}
 
 	resp, err := h.Transport.RoundTrip(req)
+	if err != nil && ctx.Err() != nil {
+		return 0, "", ctx.Err()
+	}
 	v := classify(resp, err, h.Params)
 	// classify() calls anything not 429/401/5xx a success, which is right for
 	// a client's request (a 404 means the request was wrong, not the key) but
@@ -354,7 +377,14 @@ func (h *Handler) Check(ctx context.Context, idx int, secret, model string) (sta
 	if v == vOK && resp != nil && resp.StatusCode >= 300 {
 		v = vRetryable
 	}
-	h.report(v, idx, resp)
+	if v == vOK {
+		h.Pool.ResetKey(idx)
+	}
+	if v == vInvalidKey && h.Params.MaxDisables == 0 {
+		h.Pool.ReportFailure(idx)
+	} else {
+		h.report(v, idx, resp)
+	}
 	if err != nil {
 		h.Log.Warn("key check failed", "provider", h.Name, "key", h.Pool.MaskedKey(idx), "error", err)
 		return 0, "", err
@@ -453,9 +483,10 @@ func errorText(b []byte, contentEncoding string) string {
 	if len(b) == 0 {
 		return ""
 	}
-	if contentEncoding == "gzip" {
+	if strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip") {
 		if gr, err := gzip.NewReader(bytes.NewReader(b)); err == nil {
-			if out, _ := io.ReadAll(gr); len(out) > 0 {
+			defer gr.Close()
+			if out, _ := io.ReadAll(io.LimitReader(gr, errPeekMax)); len(out) > 0 {
 				b = out
 			}
 		}
@@ -489,6 +520,9 @@ func retryAfter(resp *http.Response) (d time.Duration, ok bool) {
 		return 0, false
 	}
 	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		if int64(secs) > math.MaxInt64/int64(time.Second) {
+			return time.Duration(math.MaxInt64), true
+		}
 		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
@@ -507,7 +541,7 @@ func isStreaming(resp *http.Response) bool {
 // copyResponse streams resp's body to w. When sink is non-nil, every chunk
 // written to the client is also (best-effort, size-capped) mirrored into it
 // for the dashboard's request history.
-func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink, usage *usageScanner) {
+func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink, usage *usageScanner) error {
 	stripHopByHop(resp.Header)
 	maps.Copy(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -515,21 +549,31 @@ func copyResponse(w http.ResponseWriter, resp *http.Response, sink *sink, usage 
 	// unknown length); fixed-size bodies keep the writer's coalescing.
 	streaming := isStreaming(resp)
 	rc := http.NewResponseController(w)
+	if streaming {
+		if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+	}
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+				return werr
 			}
 			sink.Write(buf[:n])
 			usage.Write(buf[:n])
 			if streaming {
-				rc.Flush()
+				if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+					return err
+				}
 			}
 		}
 		if err != nil {
-			return
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
 }
@@ -540,9 +584,11 @@ var hopHeaders = []string{
 }
 
 func stripHopByHop(h http.Header) {
-	for _, f := range strings.Split(h.Get("Connection"), ",") {
-		if f = textproto.TrimString(f); f != "" {
-			h.Del(f)
+	for _, value := range h.Values("Connection") {
+		for _, f := range strings.Split(value, ",") {
+			if f = textproto.TrimString(f); f != "" {
+				h.Del(f)
+			}
 		}
 	}
 	for _, k := range hopHeaders {

@@ -56,6 +56,24 @@ func TestByteBudgetEviction(t *testing.T) {
 	}
 }
 
+func TestByteBudgetAfterWraparound(t *testing.T) {
+	s := New(2, 1, 10)
+	for range 10 {
+		id := s.Add(Record{ReqBody: []byte("12345")})
+		r, _ := s.Get(id)
+		if r.BodyEvicted || len(r.ReqBody) != 5 {
+			t.Fatal("newest body was evicted although the entire ring fits the budget")
+		}
+		var actual int64
+		for _, r := range s.buf {
+			actual += bodyLen(&r)
+		}
+		if got := s.Overview(0).Bytes; got != actual {
+			t.Fatalf("reported bytes=%d, actual=%d", got, actual)
+		}
+	}
+}
+
 func TestListOmitsBodies(t *testing.T) {
 	s := New(10, 10, 1<<20)
 	s.Add(Record{Route: "r", ReqBody: []byte("secret")})
@@ -152,5 +170,20 @@ func TestStatsPercentiles(t *testing.T) {
 	}
 	if st.P50Ms == 0 {
 		t.Fatal("p50 should be nonzero")
+	}
+}
+
+func TestOverviewUnitsAndPercentileRanks(t *testing.T) {
+	s := New(20, 1, 1024)
+	s.started = time.Now().Add(-2 * time.Minute)
+	for i := int64(1); i <= 20; i++ {
+		s.Add(Record{Time: time.Now(), Status: 200, Duration: i})
+	}
+	ov := s.Overview(5 * time.Minute)
+	if ov.Uptime < 120 || ov.Uptime > 121 || ov.Stats.Window != 300 {
+		t.Fatalf("fields named _s must report seconds: uptime=%v, window=%v", ov.Uptime, ov.Stats.Window)
+	}
+	if ov.Stats.P50Ms != 10 || ov.Stats.P95Ms != 19 || ov.Stats.P99Ms != 20 {
+		t.Fatalf("incorrect percentile ranks: %+v", ov.Stats)
 	}
 }

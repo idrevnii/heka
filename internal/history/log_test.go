@@ -2,7 +2,9 @@ package history
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -51,5 +53,19 @@ func TestLogHandlerWithAttrs(t *testing.T) {
 	}
 	if errs[0].Attrs["component"] != "sidecar" {
 		t.Fatalf("With-attrs not carried into captured event: %+v", errs[0].Attrs)
+	}
+}
+
+func TestLogHandlerPreservesAttributeGroups(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(10, 10, 1024)
+	log := slog.New(NewLogHandler(slog.NewTextHandler(&buf, nil), s)).With("root", "r").WithGroup("request").With("id", 7).WithGroup("nested")
+	log.Warn("failed", slog.Group("", "inline", true), slog.Group("a", "x", 1), slog.Group("b", "x", 2), "error", errors.New("upstream down"))
+	want := map[string]any{
+		"root": "r", "request.id": int64(7), "request.nested.inline": true,
+		"request.nested.a.x": int64(1), "request.nested.b.x": int64(2), "request.nested.error": "upstream down",
+	}
+	if got := s.Errors(1)[0].Attrs; !reflect.DeepEqual(got, want) {
+		t.Fatalf("attrs=%v, want %v", got, want)
 	}
 }

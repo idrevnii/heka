@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,5 +148,71 @@ func TestPasswordChangeEndsSessions(t *testing.T) {
 	srv.Swap(&State{Tokens: []string{"gw-token"}, User: "admin", PasswordHash: testHash + "-rotated"})
 	if rec := getAPI(srv, c); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("session after password change = %d, want 401", rec.Code)
+	}
+}
+
+type swapOnRead struct {
+	io.Reader
+	swap func()
+}
+
+func (r *swapOnRead) Read(p []byte) (int, error) {
+	if r.swap != nil {
+		r.swap()
+		r.swap = nil
+	}
+	return r.Reader.Read(p)
+}
+
+func TestLoginCannotSurviveConcurrentPasswordRotation(t *testing.T) {
+	srv := dashServer(t)
+	body := &swapOnRead{
+		Reader: strings.NewReader(fmt.Sprintf(`{"user":"admin","password":%q}`, testPassword)),
+		swap: func() {
+			srv.Swap(&State{User: "admin", PasswordHash: testHash + "-rotated"})
+		},
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/login", body))
+	if rec.Code != http.StatusUnauthorized || sessionOf(rec) != nil {
+		t.Fatalf("old password minted a session after rotation: %d", rec.Code)
+	}
+}
+
+func TestDashboardRejectsCrossOriginMutations(t *testing.T) {
+	srv := dashServer(t)
+	cookie := sessionOf(login(t, srv, "admin", testPassword))
+	for _, path := range []string{"/dashboard/api/login", "/dashboard/api/logout", "/dashboard/api/status/reset"} {
+		for _, origin := range []string{"https://other.example", "null", "https://example.com"} {
+			r := httptest.NewRequest("POST", "http://example.com"+path, strings.NewReader(`{}`))
+			r.Header.Set("Origin", origin)
+			r.AddCookie(cookie)
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, r)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s origin=%s returned %d", path, origin, rec.Code)
+			}
+		}
+	}
+	if rec := getAPI(srv, cookie); rec.Code != http.StatusOK {
+		t.Fatal("cross-origin logout removed the valid session")
+	}
+	r := httptest.NewRequest("POST", "http://example.com/dashboard/api/status/reset", nil)
+	r.Header.Set("Origin", "https://example.com")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-origin request behind TLS proxy rejected: %d", rec.Code)
+	}
+}
+
+func TestLoginConcurrencyIsBounded(t *testing.T) {
+	srv := dashServer(t)
+	srv.loginMu.Lock()
+	defer srv.loginMu.Unlock()
+	if rec := login(t, srv, "admin", testPassword); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("busy password verifier returned %d", rec.Code)
 	}
 }

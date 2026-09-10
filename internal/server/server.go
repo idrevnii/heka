@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/crypto/bcrypt"
@@ -27,17 +28,20 @@ type State struct {
 	Tokens []string
 	// User and PasswordHash are the dashboard login; empty means no
 	// dashboard. PasswordHash is bcrypt.
-	User          string
-	PasswordHash  string
-	Routes        map[string]http.Handler
-	Pools         map[string]*keypool.Pool
-	SidecarStates map[string]func() string
+	User              string
+	PasswordHash      string
+	DashboardDisabled bool
+	Routes            map[string]http.Handler
+	Pools             map[string]*keypool.Pool
+	SidecarStates     map[string]func() string
 }
 
 type Server struct {
 	state    atomic.Pointer[State]
 	dash     atomic.Pointer[http.Handler]
 	sessions *sessions
+	authMu   sync.Mutex // coordinates session creation with credential rotation
+	loginMu  sync.Mutex // ponytail: one bcrypt check at a time; widen if login traffic requires it
 	log      *slog.Logger
 }
 
@@ -53,7 +57,9 @@ func New(st *State, log *slog.Logger) *Server {
 // an ordinary reload but not a credential change — rotating the password is
 // how you kick out whoever is already signed in.
 func (s *Server) Swap(st *State) {
-	if old := s.state.Load(); old.User != st.User || old.PasswordHash != st.PasswordHash {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if old := s.state.Load(); old.User != st.User || old.PasswordHash != st.PasswordHash || st.DashboardDisabled {
 		s.sessions.reset()
 	}
 	s.state.Store(st)
@@ -125,7 +131,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // configured user and password.
 func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Request) {
 	dash := s.dash.Load()
-	if dash == nil {
+	if dash == nil || st.DashboardDisabled {
 		proxy.WriteError(w, http.StatusNotFound, "heka: dashboard is disabled")
 		return
 	}
@@ -144,7 +150,21 @@ func (s *Server) serveDashboard(st *State, w http.ResponseWriter, r *http.Reques
 	// actually matters against injection on a page that can act with the
 	// signed-in session.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:")
+		"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		origin := r.Header.Get("Origin")
+		u, err := url.Parse(origin)
+		scheme := "http"
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			scheme = "https"
+		}
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" || (origin != "" &&
+			(err != nil || u.Scheme != scheme || !strings.EqualFold(u.Host, r.Host))) {
+			proxy.WriteError(w, http.StatusForbidden, "heka: cross-origin dashboard request rejected")
+			return
+		}
+	}
 
 	switch r.URL.Path {
 	case "/dashboard/api/login":
@@ -181,8 +201,13 @@ func (s *Server) handleLogin(st *State, w http.ResponseWriter, r *http.Request) 
 		proxy.WriteError(w, http.StatusBadRequest, "heka: invalid request body")
 		return
 	}
-	// bcrypt is deliberately slow, so a wrong password costs the caller the
-	// same ~100ms a right one does — that is the rate limit.
+	// Bound concurrent expensive password checks before spending CPU on them.
+	if !s.loginMu.TryLock() {
+		w.Header().Set("Retry-After", "1")
+		proxy.WriteError(w, http.StatusTooManyRequests, "heka: login busy; retry shortly")
+		return
+	}
+	defer s.loginMu.Unlock()
 	userOK := subtle.ConstantTimeCompare([]byte(body.User), []byte(st.User)) == 1
 	passOK := bcrypt.CompareHashAndPassword([]byte(st.PasswordHash), []byte(body.Password)) == nil
 	if !userOK || !passOK {
@@ -191,6 +216,13 @@ func (s *Server) handleLogin(st *State, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	current := s.state.Load()
+	if current.DashboardDisabled || current.User != st.User || current.PasswordHash != st.PasswordHash {
+		proxy.WriteError(w, http.StatusUnauthorized, "heka: credentials changed; sign in again")
+		return
+	}
 	id, err := s.sessions.create()
 	if err != nil {
 		proxy.WriteError(w, http.StatusInternalServerError, "heka: could not start a session")
@@ -307,6 +339,10 @@ func (s *Server) handleStatus(st *State, w http.ResponseWriter, r *http.Request)
 func (s *Server) handleReset(st *State, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		proxy.WriteError(w, http.StatusMethodNotAllowed, "heka: POST only")
+		return
+	}
+	if r.URL.Query().Has("key") && r.URL.Query().Get("provider") == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: key requires provider")
 		return
 	}
 	var reset []string

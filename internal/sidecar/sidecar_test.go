@@ -64,3 +64,17 @@ func TestExternalURLHealthcheck(t *testing.T) {
 		t.Fatal("Wait blocked for URL-mode supervisor")
 	}
 }
+
+func TestRedirectIsHealthyAndCancellationClosesGate(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	}))
+	defer up.Close()
+	sup := &Supervisor{URL: up.URL, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup.Start(ctx)
+	waitFor(t, "healthy despite redirect loop", sup.Healthy)
+	cancel()
+	waitFor(t, "unhealthy after cancellation", func() bool { return !sup.Healthy() })
+}

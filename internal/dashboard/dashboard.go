@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -40,6 +41,7 @@ type Backend interface {
 	StatusSnapshot() map[string]any
 	ResetStatus(provider string) ([]string, error)
 	ResetStatusKey(provider string, key int) error
+	DisableStatusKey(provider string, key int, id string) error
 	CheckKey(ctx context.Context, provider string, key int) (app.CheckResult, error)
 }
 
@@ -74,6 +76,7 @@ func New(backend Backend, hist *history.Store, log *slog.Logger) *Handler {
 	mux.HandleFunc("GET /dashboard/api/status", h.handleStatus)
 	mux.HandleFunc("POST /dashboard/api/status/reset", h.handleStatusReset)
 	mux.HandleFunc("POST /dashboard/api/status/check", h.handleStatusCheck)
+	mux.HandleFunc("POST /dashboard/api/status/disable", h.handleStatusDisable)
 	mux.HandleFunc("GET /dashboard/api/config", h.handleConfigGet)
 	mux.HandleFunc("PUT /dashboard/api/config", h.handleConfigPut)
 	mux.HandleFunc("POST /dashboard/api/config/validate", h.handleConfigValidate)
@@ -139,10 +142,13 @@ func renderBody(data []byte, truncated bool, contentEncoding string) *bodyView {
 		return nil
 	}
 	decoded := false
-	if contentEncoding == "gzip" {
+	if strings.EqualFold(strings.TrimSpace(contentEncoding), "gzip") {
 		if gr, err := gzip.NewReader(bytes.NewReader(data)); err == nil {
-			if out, err := io.ReadAll(io.LimitReader(gr, 4<<20)); err == nil {
-				data = out
+			defer gr.Close()
+			const limit = 4 << 20
+			if out, err := io.ReadAll(io.LimitReader(gr, limit+1)); len(out) > 0 || err == nil {
+				truncated = truncated || err != nil || len(out) > limit
+				data = out[:min(len(out), limit)]
 				decoded = true
 			}
 		}
@@ -241,6 +247,36 @@ func (h *Handler) handleStatusCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxy.WriteJSON(w, http.StatusOK, res)
+}
+
+func (h *Handler) handleStatusDisable(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	idx, err := strconv.Atoi(q.Get("key"))
+	if err != nil || idx < 0 || q.Get("provider") == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: provider and a valid key index are required")
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.ID == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "heka: key fingerprint is required")
+		return
+	}
+	if err := h.backend.DisableStatusKey(q.Get("provider"), idx, body.ID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, app.ErrKeyNotFound) {
+			status = http.StatusNotFound
+		} else if errors.Is(err, app.ErrKeyChanged) {
+			status = http.StatusConflict
+		}
+		proxy.WriteError(w, status, "heka: "+err.Error())
+		return
+	}
+	proxy.WriteJSON(w, http.StatusOK, map[string]any{"state": "blocked", "key": idx})
 }
 
 func (h *Handler) handleConfigGet(w http.ResponseWriter, r *http.Request) {

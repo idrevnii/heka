@@ -1,7 +1,7 @@
 {
   description = "heka — minimal passthrough AI gateway with API key rotation";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
     let
@@ -10,7 +10,7 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        heka = pkgs.buildGoModule {
+        heka = pkgs.buildGo127Module {
           pname = "heka";
           version = "0.1.0";
           src = self;
@@ -38,7 +38,7 @@
       };
 
       devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.go pkgs.gopls ]; };
+        default = pkgs.mkShell { packages = [ pkgs.go_1_27 pkgs.gopls ]; };
       });
     };
 }

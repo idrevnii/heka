@@ -1,5 +1,8 @@
 # heka gateway configuration. Secrets come from environment variables via
 # ${VAR} interpolation; the file itself stays free of key material.
+# The dashboard's permanent key blocks live in <config>.disabled-keys.json
+# beside this file. Keep that directory writable and on persistent storage;
+# blocks survive resets/reloads and follow the same secret across providers.
 
 listen: "127.0.0.1:8787"
 

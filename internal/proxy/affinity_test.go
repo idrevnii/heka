@@ -67,6 +67,18 @@ func TestAffinitySeparatesConversations(t *testing.T) {
 	}
 }
 
+func TestAffinityCanonicalValuesCannotCollide(t *testing.T) {
+	for _, pair := range [][2]string{
+		{`{"input":[{"content":["a,b"]}]}`, `{"input":[{"content":["a","b"]}]}`},
+		{`{"input":[{"content":"true"}]}`, `{"input":[{"content":true}]}`},
+		{`{"input":[{"content":9007199254740992}]}`, `{"input":[{"content":9007199254740993}]}`},
+	} {
+		if hashOf(t, pair[0]) == hashOf(t, pair[1]) {
+			t.Errorf("distinct prompts share affinity: %s and %s", pair[0], pair[1])
+		}
+	}
+}
+
 func TestAffinityIgnoresFieldOrder(t *testing.T) {
 	a := hashOf(t, `{"model":"claude","system":"s","messages":[{"role":"user","content":"hi"}]}`)
 	b := hashOf(t, `{"messages":[{"content":"hi","role":"user"}],"system":"s","model":"claude"}`)

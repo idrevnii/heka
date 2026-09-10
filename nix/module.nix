@@ -68,7 +68,8 @@ in
         {file}`StateDirectory` (`/var/lib/heka/heka.yaml`) on first start
         instead of running directly from the read-only nix store — required
         for the dashboard's config editor and hot reload to be able to save
-        changes. `services.heka.settings` then only matters for the very
+        changes, and for permanent key blocks to survive restarts.
+        `services.heka.settings` then only matters for the very
         first boot; afterwards, edit the live file or use the dashboard.
       '';
     };

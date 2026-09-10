@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,14 +20,16 @@ import (
 )
 
 type fakeBackend struct {
-	content   string
-	version   string
-	editable  bool
-	applyErr  error
-	applied   string
-	statusMap map[string]any
-	resetKeys []string
-	checked   []string
+	content    string
+	version    string
+	editable   bool
+	applyErr   error
+	applied    string
+	statusMap  map[string]any
+	resetKeys  []string
+	checked    []string
+	disableErr error
+	disabledID string
 }
 
 func (f *fakeBackend) ReadConfig() ([]byte, string, string, error) {
@@ -87,6 +91,49 @@ func (f *fakeBackend) CheckKey(ctx context.Context, provider string, key int) (a
 	return app.CheckResult{OK: true, Status: 200, Message: "{}"}, nil
 }
 
+func (f *fakeBackend) DisableStatusKey(provider string, key int, id string) error {
+	if f.disableErr != nil {
+		return f.disableErr
+	}
+	f.disabledID = id
+	return nil
+}
+
+func TestPermanentDisableEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, body string
+		err               error
+		status            int
+	}{
+		{"disable", "?provider=mock&key=0", `{"id":"key-fingerprint"}`, nil, 200},
+		{"missing provider", "?key=0", `{"id":"x"}`, nil, 400},
+		{"missing index", "?provider=mock", `{"id":"x"}`, nil, 400},
+		{"negative index", "?provider=mock&key=-1", `{"id":"x"}`, nil, 400},
+		{"invalid index", "?provider=mock&key=no", `{"id":"x"}`, nil, 400},
+		{"missing identity", "?provider=mock&key=0", `{}`, nil, 400},
+		{"invalid body", "?provider=mock&key=0", `{`, nil, 400},
+		{"stale index", "?provider=mock&key=0", `{"id":"x"}`, app.ErrKeyChanged, 409},
+		{"unknown key", "?provider=mock&key=0", `{"id":"x"}`, app.ErrKeyNotFound, 404},
+		{"write failed", "?provider=mock&key=0", `{"id":"x"}`, errors.New("disk full"), 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, be, _ := newTestHandler()
+			be.disableErr = tc.err
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/dashboard/api/status/disable"+tc.query, strings.NewReader(tc.body)))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body)
+			}
+			if tc.status == 200 && be.disabledID != "key-fingerprint" {
+				t.Fatalf("wrong key identity: %q", be.disabledID)
+			}
+			if tc.status != 200 && be.disabledID != "" {
+				t.Fatal("rejected request disabled a key")
+			}
+		})
+	}
+}
+
 func newTestHandler() (*Handler, *fakeBackend, *history.Store) {
 	be := &fakeBackend{content: "auth: {}", version: "v1", editable: true, statusMap: map[string]any{"providers": map[string]any{}}}
 	store := history.New(10, 10, 1<<20)
@@ -135,6 +182,25 @@ func TestRequestDetailRendersBody(t *testing.T) {
 	reqBody := detail["req_body"].(map[string]any)
 	if reqBody["text"] != `{"a":1}` || reqBody["encoding"] != "utf8" {
 		t.Fatalf("req_body = %+v", reqBody)
+	}
+}
+
+func TestRenderGzipBodyShowsTruncation(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(bytes.Repeat([]byte("x"), 5<<20))
+	zw.Close()
+	view := renderBody(buf.Bytes(), false, "gzip")
+	if view == nil || !view.Decoded || !view.Truncated || len(view.Text) != 4<<20 {
+		t.Fatal("inflated body was cut without marking truncation")
+	}
+	buf.Reset()
+	zw = gzip.NewWriter(&buf)
+	zw.Write([]byte("a small body"))
+	zw.Close()
+	view = renderBody(buf.Bytes()[:buf.Len()-8], true, "gzip")
+	if view == nil || !view.Decoded || !view.Truncated || view.Text != "a small body" {
+		t.Fatalf("truncated gzip should still show its decoded prefix: %+v", view)
 	}
 }
 

@@ -3,6 +3,8 @@
 package keypool
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"hash/fnv"
 	"sync"
 	"time"
@@ -11,6 +13,9 @@ import (
 type Config struct {
 	CooldownBase time.Duration
 	CooldownMax  time.Duration
+	// Blocked contains key fingerprints. Shared across pools and reloads so
+	// even a handler finishing on an old pool sees permanent blocks.
+	Blocked *sync.Map
 }
 
 type Pool struct {
@@ -23,7 +28,8 @@ type Pool struct {
 }
 
 type key struct {
-	secret string
+	secret      string
+	fingerprint string
 	// id identifies the key for rendezvous hashing. It is derived from the
 	// secret rather than from the position in the pool, so reordering the
 	// keys in the config doesn't reshuffle every affinity binding.
@@ -93,7 +99,7 @@ func (u *Usage) add(o Usage) {
 func New(cfg Config, secrets []string) *Pool {
 	p := &Pool{cfg: cfg, now: time.Now}
 	for _, s := range secrets {
-		p.keys = append(p.keys, &key{secret: s, id: keyID(s)})
+		p.keys = append(p.keys, &key{secret: s, id: keyID(s), fingerprint: Fingerprint(s)})
 		p.masks = append(p.masks, Mask(s))
 	}
 	return p
@@ -128,7 +134,7 @@ func (p *Pool) acquire(affinity uint64, bound bool, tried map[int]bool) (idx int
 	if bound {
 		best, bestScore := -1, uint64(0)
 		for i, k := range p.keys {
-			if tried[i] || k.disabled || k.cooldownUntil.After(now) {
+			if tried[i] || k.disabled || p.IsBlocked(i) || k.cooldownUntil.After(now) {
 				continue
 			}
 			if score := mix(affinity, k.id); best == -1 || score > bestScore {
@@ -143,7 +149,7 @@ func (p *Pool) acquire(affinity uint64, bound bool, tried map[int]bool) (idx int
 		for i := range n {
 			idx := (p.next + i) % n
 			k := p.keys[idx]
-			if tried[idx] || k.disabled || k.cooldownUntil.After(now) {
+			if tried[idx] || k.disabled || p.IsBlocked(idx) || k.cooldownUntil.After(now) {
 				continue
 			}
 			p.next = (idx + 1) % n
@@ -152,7 +158,7 @@ func (p *Pool) acquire(affinity uint64, bound bool, tried map[int]bool) (idx int
 	}
 	best := -1
 	for i, k := range p.keys {
-		if tried[i] || k.disabled {
+		if tried[i] || k.disabled || p.IsBlocked(i) {
 			continue
 		}
 		if best == -1 || k.cooldownUntil.Before(p.keys[best].cooldownUntil) {
@@ -210,7 +216,11 @@ func (p *Pool) ReportRateLimited(idx int, retryAfter time.Duration, hasRetryAfte
 	} else {
 		d = p.cfg.CooldownBase
 		for i := 1; i < k.consecLimited && d < p.cfg.CooldownMax; i++ {
-			d *= 2
+			if d > p.cfg.CooldownMax/2 {
+				d = p.cfg.CooldownMax
+			} else {
+				d *= 2
+			}
 		}
 	}
 	d = min(d, p.cfg.CooldownMax)
@@ -263,6 +273,7 @@ type KeyStatus struct {
 	// Index is the key's position in the pool — the handle the dashboard
 	// passes back to reset this one key.
 	Index         int        `json:"index"`
+	ID            string     `json:"id"`
 	Key           string     `json:"key"`
 	State         string     `json:"state"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
@@ -289,7 +300,7 @@ func (p *Pool) Snapshot() []KeyStatus {
 	out := make([]KeyStatus, len(p.keys))
 	for i, k := range p.keys {
 		st := KeyStatus{
-			Index: i, Key: p.masks[i], State: "active", Successes: k.successes, Failures: k.failures,
+			Index: i, ID: k.fingerprint, Key: p.masks[i], State: "active", Successes: k.successes, Failures: k.failures,
 			LastError:        k.lastError,
 			InputTokens:      k.usage.Input,
 			CacheReadTokens:  k.usage.CacheRead,
@@ -301,6 +312,8 @@ func (p *Pool) Snapshot() []KeyStatus {
 			st.CacheHitRate = &rate
 		}
 		switch {
+		case p.IsBlocked(i):
+			st.State = "blocked"
 		case k.disabled:
 			st.State = "disabled"
 		case k.cooldownUntil.After(now):
@@ -318,6 +331,22 @@ func (p *Pool) MaskedKey(idx int) string {
 		return ""
 	}
 	return p.masks[idx]
+}
+
+// IsBlocked is independent of resettable runtime state. Keys are immutable
+// after New; only the shared concurrent map changes.
+func (p *Pool) IsBlocked(idx int) bool {
+	if p.cfg.Blocked == nil || idx < 0 || idx >= len(p.keys) {
+		return false
+	}
+	_, blocked := p.cfg.Blocked.Load(p.keys[idx].fingerprint)
+	return blocked
+}
+
+// Fingerprint identifies a secret without storing it in the blocklist.
+func Fingerprint(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
 }
 
 func keyID(secret string) uint64 {

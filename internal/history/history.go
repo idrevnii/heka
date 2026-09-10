@@ -5,6 +5,7 @@
 package history
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -78,13 +79,13 @@ type RouteCounters struct {
 }
 
 type Stats struct {
-	Window    time.Duration `json:"window_s"`
-	Count     int           `json:"count"`
-	Errors    int           `json:"errors"`
-	ErrorRate float64       `json:"error_rate"`
-	P50Ms     int64         `json:"p50_ms"`
-	P95Ms     int64         `json:"p95_ms"`
-	P99Ms     int64         `json:"p99_ms"`
+	Window    int64   `json:"window_s"`
+	Count     int     `json:"count"`
+	Errors    int     `json:"errors"`
+	ErrorRate float64 `json:"error_rate"`
+	P50Ms     int64   `json:"p50_ms"`
+	P95Ms     int64   `json:"p95_ms"`
+	P99Ms     int64   `json:"p99_ms"`
 }
 
 // Store is a fixed-capacity ring buffer of Records plus a separate ring of
@@ -189,7 +190,7 @@ func (s *Store) Add(r Record) uint64 {
 
 	s.seq++
 	r.ID = s.seq
-	s.bytes += bodyLen(&r)
+	s.bytes += bodyLen(&r) - bodyLen(&s.buf[s.next])
 
 	s.buf[s.next] = r
 	s.next = (s.next + 1) % len(s.buf)
@@ -359,7 +360,7 @@ func (s *Store) Errors(limit int) []Event {
 
 // Overview is the aggregate summary for the dashboard's landing view.
 type Overview struct {
-	Uptime      time.Duration            `json:"uptime_s"`
+	Uptime      int64                    `json:"uptime_s"`
 	Total       uint64                   `json:"total"`
 	ByStatus    map[string]uint64        `json:"by_status_class"`
 	ByRoute     map[string]RouteCounters `json:"by_route"`
@@ -390,7 +391,7 @@ func (s *Store) Overview(window time.Duration) Overview {
 	}
 
 	return Overview{
-		Uptime:      time.Since(s.started),
+		Uptime:      int64(time.Since(s.started) / time.Second),
 		Total:       s.total,
 		ByStatus:    byStatus,
 		ByRoute:     byRoute,
@@ -447,7 +448,7 @@ func (s *Store) statsLocked(window time.Duration) Stats {
 	}
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	st := Stats{
-		Window: window,
+		Window: int64(window / time.Second),
 		Count:  len(durations),
 		Errors: errs,
 	}
@@ -464,9 +465,6 @@ func percentile(sorted []int64, p float64) int64 {
 	if len(sorted) == 0 {
 		return 0
 	}
-	idx := int(p * float64(len(sorted)))
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
-	}
+	idx := max(0, min(int(math.Ceil(p*float64(len(sorted))))-1, len(sorted)-1))
 	return sorted[idx]
 }

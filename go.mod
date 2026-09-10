@@ -1,6 +1,6 @@
 module github.com/idrevnii/heka
 
-go 1.24.0
+go 1.27.1
 
 require (
 	golang.org/x/crypto v0.31.0

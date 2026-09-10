@@ -8,6 +8,7 @@ deploy/heka.local.yaml
 # the deployed config volume may be bind-mounted here for local testing
 /etc-heka/
 *.bak-*
+*.disabled-keys.json
 
 # build output
 /heka
