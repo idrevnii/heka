@@ -1,26 +1,27 @@
-# Deploying Heka with CLIProxyAPI on Coolify
+# Deploying Heka with CLIProxyAPI on Dokploy
 
 This deployment runs Heka and CLIProxyAPI as separate containers in one
 Docker Compose project. Heka is the only client-facing service. CLIProxyAPI is
 reachable only from the private Compose network.
 
-## Coolify resource
+## Dokploy resource
 
-Create a Docker Compose application from the private GitHub repository:
+Create a Compose service (type **Docker Compose**) from the GitHub provider:
 
 - repository: `idrevnii/heka`
 - branch: `main`
-- base directory: `/`
-- Compose file: `/docker-compose.yml`
-- public domain: none
+- Compose path: `./docker-compose.yml`
+- domains: none
 
-The default host binding is `10.40.0.10:8787`. Coolify generates stable,
-64-character values for both `SERVICE_PASSWORD_64_HEKA` and
-`SERVICE_PASSWORD_64_CLIPROXY`.
+The host binding is `10.40.0.10:8787` (override with `HEKA_BIND_ADDRESS` /
+`HEKA_PORT`). Set two random secrets in the service's **Environment** tab,
+for example generated with `openssl rand -hex 32`:
 
-The Heka token is the value of `SERVICE_PASSWORD_64_HEKA` shown in Coolify.
-Clients use it as their API key. The CLIProxyAPI key is internal and should
-not be given to clients.
+- `HEKA_TOKEN` — the gateway token. Clients use it as their API key.
+- `CLIPROXY_API_KEY` — internal key between Heka and CLIProxyAPI; do not give
+  it to clients.
+
+Compose refuses to start if either is missing.
 
 The dashboard has its own login, separate from that token. It is **off until
 you configure one** — heka has no default password and never invents a hash.
@@ -30,7 +31,7 @@ To turn it on, generate a bcrypt hash once:
 printf '%s' 'your-password' | docker compose run --rm --no-deps -T heka -hash
 ```
 
-and set the `$2a$...` line as `HEKA_PASSWORD_HASH` in Coolify's environment
+and set the `$2a$...` line as `HEKA_PASSWORD_HASH` in Dokploy's environment
 (`HEKA_USER` too if `admin` isn't the name you want). Leave it unset and
 `/dashboard` answers `404` with that hint, while the gateway itself runs
 normally.
@@ -48,7 +49,7 @@ auth:
 
 The file watcher picks it up within `dashboard.watch` (10s), so no restart
 is needed — but the container does need `HEKA_PASSWORD_HASH` in its
-environment, which in Coolify means redeploying after setting it.
+environment, which in Dokploy means redeploying after setting it.
 
 `deploy/heka.yaml` in the repo is only a **first-boot seed**. The live,
 authoritative config is `/data/apps/heka/config/heka.yaml` on the host,
@@ -77,7 +78,7 @@ response flags this via `restart_required`. **The live config file may
 contain plaintext provider API keys** — the `${VAR}` indirection used in
 `deploy/heka.yaml` is no longer required once the file is live and edited
 via the dashboard, though it still works. Treat that file with the same
-sensitivity as the Coolify secrets it replaces.
+sensitivity as the Dokploy environment secrets.
 
 CLIProxyAPI's own (non-secret) config still lives in `docker-compose.yml`
 under `configs.cliproxy-config`; commit and redeploy for changes there.
@@ -122,7 +123,7 @@ ssh -t apps \
   "sudo docker run --rm -it --network host \
   -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
   -v /data/apps/heka/cliproxy-login.yaml:/CLIProxyAPI/config.yaml \
-  eceasy/cli-proxy-api:v7.2.100 \
+  eceasy/cli-proxy-api:v7.3.19 \
   ./CLIProxyAPI --xai-login --no-browser"
 ```
 
@@ -144,12 +145,12 @@ ssh -t apps \
   "sudo docker run --rm -it --network host \
   -v /data/apps/heka/cliproxy-auth:/root/.cli-proxy-api \
   -v /data/apps/heka/cliproxy-login.yaml:/CLIProxyAPI/config.yaml \
-  eceasy/cli-proxy-api:v7.2.100 \
+  eceasy/cli-proxy-api:v7.3.19 \
   ./CLIProxyAPI --codex-login --no-browser"
 ```
 
 CLIProxyAPI watches the authentication directory. Restart its container from
-Coolify if a newly added account does not appear immediately.
+Dokploy if a newly added account does not appear immediately.
 
 ## Verification
 
@@ -179,7 +180,7 @@ clients that make it optional.
 
 ## Logs and status
 
-Both services write to stdout/stderr. Coolify shows their logs separately.
+Both services write to stdout/stderr. Dokploy shows their logs separately.
 Docker retains up to five 20 MiB local log files per service.
 
 Heka exposes:

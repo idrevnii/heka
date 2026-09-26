@@ -11,14 +11,13 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      HEKA_TOKEN: "${SERVICE_PASSWORD_64_HEKA}"
+      HEKA_TOKEN: "${HEKA_TOKEN:?}"
       # Dashboard login. Both empty (the default) means no dashboard — set
       # HEKA_PASSWORD_HASH to turn it on; the user then defaults to "admin".
       #   printf '%s' 'password' | docker compose run --rm --no-deps -T heka -hash
       HEKA_USER: "${HEKA_USER:-}"
       HEKA_PASSWORD_HASH: "${HEKA_PASSWORD_HASH:-}"
-      CLIPROXY_API_KEY: "${SERVICE_PASSWORD_64_CLIPROXY}"
-      COOLIFY_APP_NAME: heka
+      CLIPROXY_API_KEY: "${CLIPROXY_API_KEY:?}"
     ports:
       - "${HEKA_BIND_ADDRESS:-10.40.0.10}:${HEKA_PORT:-8787}:8787"
     volumes:
@@ -60,11 +59,10 @@ services:
     restart: "no"
 
   cliproxyapi:
-    image: eceasy/cli-proxy-api:v7.2.100
+    image: eceasy/cli-proxy-api:v7.3.19
     restart: unless-stopped
     environment:
       TZ: Europe/Moscow
-      COOLIFY_APP_NAME: cliproxyapi
     expose:
       - "8317"
     configs:
@@ -101,7 +99,7 @@ configs:
       auth-dir: "/root/.cli-proxy-api"
 
       api-keys:
-        - "${SERVICE_PASSWORD_64_CLIPROXY}"
+        - "${CLIPROXY_API_KEY:?}"
 
       debug: false
       request-log: false
